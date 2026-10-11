@@ -1,0 +1,92 @@
+# Production stack on one EC2 instance. deploy.sh writes .env (REGISTRY, IMAGE_TAG, DOMAIN), app.env and owner.env.
+# Only Caddy publishes ports (80/443). The database is external (DATABASE_URL* in app.env).
+name: we360
+
+x-backend: &backend
+  image: ${REGISTRY}/we360-agents-api:${IMAGE_TAG}
+  restart: unless-stopped
+  env_file:
+    - path: app.env
+      format: raw
+  environment:
+    NODE_ENV: production
+    API_PORT: "4000"
+    REDIS_URL: redis://redis:6379
+    # Caddy is the only proxy in front of the API, and it overwrites X-Forwarded-For from the client.
+    TRUST_PROXY_HOPS: "1"
+  depends_on:
+    redis:
+      condition: service_healthy
+  logging: &logging
+    driver: json-file
+    options: { max-size: "20m", max-file: "5" }
+
+services:
+  caddy:
+    image: caddy:2.10.2-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443", "443:443/udp"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on: [web, api]
+    logging: *logging
+
+  web:
+    image: ${REGISTRY}/we360-agents-web:${IMAGE_TAG}
+    restart: unless-stopped
+    environment:
+      NODE_ENV: production
+      APP_URL: https://${DOMAIN}
+      API_INTERNAL_URL: http://api:4000
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/').then(r=>process.exit(r.status<500?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    logging: *logging
+
+  api:
+    <<: *backend
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/healthz').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
+  worker:
+    <<: *backend
+    command: ["node", "dist/worker.js"]
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # BullMQ needs noeviction. AOF keeps queued jobs across restarts.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      retries: 10
+    logging: *logging
+
+  # One-off tasks run by deploy.sh with the owner (master) connection: db-init, migrate, seed.
+  # Not started by `up`. The owner credentials are never given to the long-running services.
+  dbtask:
+    image: ${REGISTRY}/we360-agents-api:${IMAGE_TAG}
+    profiles: ["tasks"]
+    env_file:
+      - path: owner.env
+        format: raw
+    logging: *logging
+
+volumes:
+  caddy_data:
+  caddy_config:
+  redis_data:

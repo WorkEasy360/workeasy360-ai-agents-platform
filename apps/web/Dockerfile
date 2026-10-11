@@ -8,7 +8,9 @@ COPY apps/web/package.json apps/web/
 RUN pnpm install --frozen-lockfile --filter @we360/web...
 COPY apps/web apps/web
 ARG NEXT_PUBLIC_GOOGLE_LOGIN=false
-ENV NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT=standalone NEXT_PUBLIC_GOOGLE_LOGIN=$NEXT_PUBLIC_GOOGLE_LOGIN
+# The /api rewrite in next.config.ts is resolved at build time, so the API address is a build argument.
+ARG API_INTERNAL_URL=http://localhost:4000
+ENV NEXT_TELEMETRY_DISABLED=1 NEXT_OUTPUT=standalone NEXT_PUBLIC_GOOGLE_LOGIN=$NEXT_PUBLIC_GOOGLE_LOGIN API_INTERNAL_URL=$API_INTERNAL_URL
 RUN pnpm --filter @we360/web build
 
 FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402

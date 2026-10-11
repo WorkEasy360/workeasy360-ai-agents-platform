@@ -87,7 +87,9 @@ One-off tasks with the API image: `node dist/scripts/migrate.js` (migrations), `
 
 ## Deploying to AWS
 
-Terraform for staging and prod (ap-south-1) is in [infra/terraform](infra/terraform). The GitHub deploy workflow is [.github/workflows/deploy.yml](.github/workflows/deploy.yml). Runbooks are in [docs/runbooks](docs/runbooks): start with `deploy.md`. The Terraform has not been run against AWS yet: run `terraform fmt` / `validate` and review the plan before the first apply.
+**Current setup: one EC2 instance in Mumbai with an existing RDS/Aurora PostgreSQL database.** Every push to `main` deploys after CI passes ([.github/workflows/deploy.yml](.github/workflows/deploy.yml) → AWS SSM → [infra/ec2/deploy.sh](infra/ec2/deploy.sh)). One-time setup and operations: [docs/runbooks/ec2-deploy.md](docs/runbooks/ec2-deploy.md).
+
+The earlier ECS/Fargate Terraform for staging and prod is still in [infra/terraform/envs](infra/terraform/envs) (see `deploy.md`) but is not used by the current workflow. None of the Terraform has been run against AWS yet: run `terraform fmt` / `validate` and review the plan before the first apply.
 
 ## Changing the auth schema
 
