@@ -3,7 +3,7 @@
 Read [DEVELOPMENT.md](./DEVELOPMENT.md) first: local setup, code map, rules, feature checklist, deployment and gotchas. Production runbook: [deploy/README.md](./deploy/README.md).
 
 Non-negotiables:
-- **Pushing to `main` deploys to production** through GitHub Actions (CI, then Deploy). Only push when the user asks.
+- **Pushing to `main` deploys to production** (https://16-171-214-145.sslip.io) through GitHub Actions (CI, then Deploy). Only push when the user asks.
 - **The production database is a SHARED Aurora cluster.** This app may only touch schema `agents`, as roles `agents_app` (API) and `agents_owner` (worker, migrations).
   - Never run `drizzle-kit push`, resets, drops or seeds other than the insert-only catalog seed against it.
   - Never touch schemas `public`, `helpdesk` or `hrms`.

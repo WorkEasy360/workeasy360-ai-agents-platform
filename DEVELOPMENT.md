@@ -6,7 +6,7 @@ Everything you need to change WorkEasy360 AI Agents and ship it. Production deta
 
 | | |
 |---|---|
-| **Live site** | _set after the first deploy_ (API under `/api`, health at `/api/health`) |
+| **Live site** | https://16-171-214-145.sslip.io (API under `/api`, health at `/api/health`) |
 | **Repository** | https://github.com/WorkEasy360/workeasy360-ai-agents-platform, branch `main` |
 | **Deploy** | Push to `main`. CI runs; if it passes, GitHub Actions builds the images and rolls them out to the EC2 host. |
 | **Stack** | pnpm + Turborepo. API: Express 5 + TypeScript + Drizzle + Better Auth, BullMQ worker. Web: Next.js 16 + React 19 + Tailwind. |
@@ -166,3 +166,18 @@ $C logs -f --tail=200 api    # or worker, web, nginx
   - Changing a plan directly in the database takes up to 30 s to apply in a running API. The admin screens clear the cache immediately.
   - Tests disable caching (`CACHE_TTL_MS=0`).
 - **Shared cluster capacity:** Aurora allows 79 connections in total. This app's roles are capped at 20 (agents_app 12, agents_owner 8); the pool sizes in `docker-compose.prod.yml` stay below that.
+
+## Open items
+
+- **Rotate the Aurora admin (`postgres`) password.** It was shared during setup. The app never uses it.
+- **Email:**
+  1. Verify `workeasy360.com` in SES in eu-north-1 (Easy DKIM, 3 CNAME records) and request production access.
+  2. Check that the `ai-agents-ec2` inline policy's `ses:FromAddress` is `no-reply@workeasy360.com`.
+  3. Add `SES_REGION=eu-north-1` to the server `.env` and run `$C up -d api worker`.
+- **Database endpoint:** the app uses the instance endpoint `projectmodule-test.cvka262cqti8…`. After an Aurora failover that host could become a read-only replica. Switch `DATABASE_URL*` to the cluster writer endpoint (`…cluster-…`) when convenient.
+- **Shared connections:** Aurora allows 79 in total. At setup, 45 were in use, and the role limits are helpdesk 30, hrms 20 and agents 20.
+- **Platform AI keys:** none are set in production, so every organization must add its own key (BYOK) until `OPENAI_API_KEY` etc. are added to the server `.env`.
+- **A real domain** instead of sslip.io. Point DNS at 16.171.214.145, set `DOMAIN`, run `scripts/init-letsencrypt.sh`, and update the GitHub `DOMAIN` variable.
+- **GitHub Actions housekeeping:**
+  - Dependabot's Node 25 image PRs should be closed (not LTS).
+  - Update the pinned actions that still target Node 20.
