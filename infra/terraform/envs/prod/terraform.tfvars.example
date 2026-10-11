@@ -1,0 +1,37 @@
+# Copy to terraform.tfvars and fill in. No secret values go here (set them in Secrets Manager).
+
+domain_name         = "agents.workeasy360.com"
+alb_certificate_arn = "arn:aws:acm:ap-south-1:111111111111:certificate/REPLACE_ME"
+route53_zone_id     = ""
+
+# Network: new VPC (default) or an existing one with NAT egress on the private subnets.
+create_vpc = true
+vpc_cidr   = "10.41.0.0/16"
+# create_vpc         = false
+# vpc_id             = "vpc-0123456789abcdef0"
+# private_subnet_ids = ["subnet-aaa", "subnet-bbb"]
+# public_subnet_ids  = ["subnet-ccc", "subnet-ddd"]
+
+# Same AWS account as staging: reuse staging's ECR repos, SES identity and GitHub OIDC provider.
+# Separate prod account: set all three to true.
+create_ecr_repositories     = false
+create_ses_identity         = false
+create_github_oidc_provider = false
+
+email_from = "WorkEasy360 Agents <no-reply@workeasy360.com>"
+ses_domain = "workeasy360.com"
+
+optional_secrets_enabled = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY", "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET"]
+
+# Sizes (defaults shown). A cheaper beta start: db_instance_class = "db.t4g.large".
+# db_instance_class = "db.m7g.large"
+# redis_node_type   = "cache.t4g.small"
+
+alarm_emails      = ["ops@workeasy360.com", "oncall@workeasy360.com"]
+github_repository = "your-org/workeasy360-agents"
+
+# Recommended for launch: WAF on the ALB (CloudFront optional; needs a us-east-1 cert).
+enable_waf          = true
+enable_cloudfront   = false
+# cloudfront_certificate_arn = "arn:aws:acm:us-east-1:111111111111:certificate/REPLACE_ME"
+admin_allowed_cidrs = [] # e.g. ["203.0.113.10/32"] to lock /admin to the office/VPN

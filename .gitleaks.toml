@@ -1,0 +1,7 @@
+# Default gitleaks rules plus documented placeholders that are not secrets.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Placeholder in the API usage example on the Deploy page"
+regexes = ['''^YOUR_API_KEY$''']

@@ -1,0 +1,31 @@
+# Copy to terraform.tfvars and fill in. No secret values go here (set them in Secrets Manager).
+
+domain_name         = "staging.agents.workeasy360.com"
+alb_certificate_arn = "arn:aws:acm:ap-south-1:111111111111:certificate/REPLACE_ME"
+route53_zone_id     = "" # set to let Terraform create the DNS alias + SES DKIM records
+
+# Network: create a new VPC (default) ...
+create_vpc = true
+vpc_cidr   = "10.40.0.0/16"
+# ... or use an existing one (private subnets must already route 0.0.0.0/0 through a NAT gateway):
+# create_vpc         = false
+# vpc_id             = "vpc-0123456789abcdef0"
+# private_subnet_ids = ["subnet-aaa", "subnet-bbb"]
+# public_subnet_ids  = ["subnet-ccc", "subnet-ddd"]
+
+create_ecr_repositories = true # first environment in this AWS account
+
+email_from          = "WorkEasy360 Agents <no-reply@workeasy360.com>"
+ses_domain          = "workeasy360.com"
+create_ses_identity = true # SES identity is per account+region; prod sets false if same account
+
+# Only list provider/Google secrets you have actually set a value for.
+optional_secrets_enabled = ["OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_GENERATIVE_AI_API_KEY"]
+
+alarm_emails = ["ops@workeasy360.com"]
+
+github_repository           = "your-org/workeasy360-agents"
+create_github_oidc_provider = true # false if the account already has token.actions.githubusercontent.com
+
+enable_waf        = false
+enable_cloudfront = false

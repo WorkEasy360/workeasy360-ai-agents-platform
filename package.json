@@ -1,0 +1,29 @@
+{
+  "name": "workeasy360-agents",
+  "private": true,
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "turbo run dev --parallel",
+    "build": "turbo run build",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "services:up": "docker compose up -d",
+    "services:down": "docker compose down",
+    "db:generate": "pnpm --filter @we360/db generate",
+    "db:migrate": "pnpm --filter @we360/db migrate",
+    "db:seed": "pnpm --filter @we360/db seed",
+    "admin:create": "pnpm --filter @we360/api admin:create"
+  },
+  "devDependencies": {
+    "turbo": "^2.5.0",
+    "typescript": "^5.8.0"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}

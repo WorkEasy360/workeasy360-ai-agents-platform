@@ -1,0 +1,8 @@
+packages:
+  - "apps/*"
+  - "packages/*"
+
+# Supply-chain hardening: transitive deps only from the registry, and skip versions
+# published less than 3 days ago (most malicious releases are caught and pulled within that time).
+blockExoticSubdeps: true
+minimumReleaseAge: 4320

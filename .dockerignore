@@ -1,0 +1,21 @@
+# Keep secrets and local state out of the Docker build context (and therefore out of any layer).
+.env
+.env.*
+!.env.example
+**/*.pem
+**/*.key
+**/*.p12
+**/*service-account*.json
+
+# Local state and build output
+.git
+**/node_modules
+**/.next
+**/dist
+**/.turbo
+coverage
+demo-data
+infra/terraform/**/.terraform
+infra/terraform/**/*.tfstate*
+infra/terraform/**/*.tfvars
+**/*.log

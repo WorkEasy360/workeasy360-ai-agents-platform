@@ -1,0 +1,224 @@
+name: Deploy
+
+# CI passed on main -> staging. Manual run -> staging or prod (protect the "prod" GitHub Environment with
+# required reviewers). AWS access via GitHub OIDC; the role comes from the Environment variable
+# AWS_DEPLOY_ROLE_ARN (Terraform output github_deploy_role_arn).
+#
+# Steps: build + push api/web images tagged with the git SHA (skipped if the tag already exists, e.g. when
+# promoting a staging build to prod) -> run the migration task and fail on a non-zero exit ->
+# register new task definition revisions (latest revision of each family, new image) -> update the
+# web/api/worker services -> wait for stability and verify the new revision is what is running.
+
+on:
+  # Staging deploys only after CI (tests, audit, secret scan) passed for that commit on main.
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: Target environment
+        type: choice
+        options: [staging, prod]
+        default: staging
+
+permissions:
+  id-token: write
+  contents: read
+
+concurrency:
+  group: deploy-${{ inputs.environment || 'staging' }}
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: ${{ inputs.environment || 'staging' }}
+    env:
+      DEPLOY_ENV: ${{ inputs.environment || 'staging' }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
+      # The commit CI tested (workflow_run), or the selected ref (manual run).
+      IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
+      API_REPO: we360-agents-api
+      WEB_REPO: we360-agents-web
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.workflow_run.head_sha || github.sha }}
+
+      - name: Resolve names
+        run: |
+          PREFIX="we360-agents-${DEPLOY_ENV}"
+          {
+            echo "CLUSTER=${PREFIX}"
+            echo "WEB_SERVICE=${PREFIX}-web"
+            echo "API_SERVICE=${PREFIX}-api"
+            echo "WORKER_SERVICE=${PREFIX}-worker"
+            echo "MIGRATE_FAMILY=${PREFIX}-migrate"
+          } >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Set image URIs
+        run: |
+          REGISTRY="${{ steps.ecr.outputs.registry }}"
+          echo "API_IMAGE=${REGISTRY}/${API_REPO}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "WEB_IMAGE=${REGISTRY}/${WEB_REPO}:${IMAGE_TAG}" >> "$GITHUB_ENV"
+
+      - name: Check for existing images
+        id: exists
+        run: |
+          for repo in api web; do
+            name="we360-agents-${repo}"
+            if aws ecr describe-images --repository-name "$name" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
+              echo "${repo}=true" >> "$GITHUB_OUTPUT"; echo "$name:$IMAGE_TAG exists, skipping build"
+            else
+              echo "${repo}=false" >> "$GITHUB_OUTPUT"
+            fi
+          done
+
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Build and push api image
+        if: steps.exists.outputs.api != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: true
+          provenance: false
+          tags: ${{ env.API_IMAGE }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      - name: Build and push web image
+        if: steps.exists.outputs.web != 'true'
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: true
+          # NEXT_PUBLIC_* values are baked in at build time (the same image is promoted to prod).
+          build-args: |
+            NEXT_PUBLIC_GOOGLE_LOGIN=${{ vars.NEXT_PUBLIC_GOOGLE_LOGIN }}
+          provenance: false
+          tags: ${{ env.WEB_IMAGE }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      - name: Define task definition helper
+        run: |
+          cat > "$RUNNER_TEMP/render.sh" <<'EOF'
+          #!/usr/bin/env bash
+          # render.sh <family> <image>: registers a new revision of the family's latest revision with a new
+          # image (keeps env/secrets/roles that Terraform set) and prints the new task definition ARN.
+          set -euo pipefail
+          family="$1"; image="$2"
+          aws ecs describe-task-definition --task-definition "$family" --include TAGS --output json > "$RUNNER_TEMP/td-$family.json"
+          jq --arg IMG "$image" '
+            (.tags // []) as $tags
+            | .taskDefinition
+            | del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities,
+                  .registeredAt, .registeredBy, .deregisteredAt)
+            | .containerDefinitions |= map(.image = $IMG)
+            | if ($tags | length) > 0 then .tags = $tags else . end
+          ' "$RUNNER_TEMP/td-$family.json" > "$RUNNER_TEMP/td-$family-new.json"
+          aws ecs register-task-definition --cli-input-json "file://$RUNNER_TEMP/td-$family-new.json" \
+            --query 'taskDefinition.taskDefinitionArn' --output text
+          EOF
+          chmod +x "$RUNNER_TEMP/render.sh"
+
+      - name: Run database migrations
+        run: |
+          set -euo pipefail
+          MIGRATE_TD=$("$RUNNER_TEMP/render.sh" "$MIGRATE_FAMILY" "$API_IMAGE")
+          echo "Migration task definition: $MIGRATE_TD"
+
+          # Same private subnets + security group as the worker (it has DB access).
+          NETCFG=$(aws ecs describe-services --cluster "$CLUSTER" --services "$WORKER_SERVICE" \
+            --query 'services[0].networkConfiguration' --output json)
+
+          RUN=$(aws ecs run-task --cluster "$CLUSTER" --launch-type FARGATE \
+            --task-definition "$MIGRATE_TD" --network-configuration "$NETCFG" \
+            --started-by "gha-${GITHUB_RUN_ID}" --output json)
+          TASK_ARN=$(echo "$RUN" | jq -r '.tasks[0].taskArn // empty')
+          if [ -z "$TASK_ARN" ]; then
+            echo "::error::run-task failed: $(echo "$RUN" | jq -c '.failures')"; exit 1
+          fi
+          echo "Migration task: $TASK_ARN"
+
+          # The waiter polls for ~10 minutes; loop so long migrations get up to ~30.
+          for i in 1 2 3; do
+            if aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN"; then break; fi
+            [ "$i" = 3 ] && { echo "::error::Migration task did not stop in time"; exit 1; }
+          done
+
+          DESC=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --output json)
+          EXIT_CODE=$(echo "$DESC" | jq -r '.tasks[0].containers[0].exitCode // "none"')
+          REASON=$(echo "$DESC" | jq -r '.tasks[0].stoppedReason // ""')
+          TASK_ID="${TASK_ARN##*/}"
+          echo "--- migration logs ---"
+          aws logs get-log-events --log-group-name "/ecs/${MIGRATE_FAMILY}" \
+            --log-stream-name "migrate/migrate/${TASK_ID}" --start-from-head \
+            --query 'events[].message' --output text || echo "(no logs available)"
+          if [ "$EXIT_CODE" != "0" ]; then
+            echo "::error::Migration failed (exit code: $EXIT_CODE; reason: $REASON). Services were not updated."
+            exit 1
+          fi
+          echo "Migrations applied."
+
+      - name: Deploy services
+        run: |
+          set -euo pipefail
+          declare -A IMAGES=( ["$API_SERVICE"]="$API_IMAGE" ["$WORKER_SERVICE"]="$API_IMAGE" ["$WEB_SERVICE"]="$WEB_IMAGE" )
+          : > "$RUNNER_TEMP/deployed.txt"
+          for svc in "$API_SERVICE" "$WORKER_SERVICE" "$WEB_SERVICE"; do
+            TD=$("$RUNNER_TEMP/render.sh" "$svc" "${IMAGES[$svc]}")
+            echo "$svc -> $TD"
+            aws ecs update-service --cluster "$CLUSTER" --service "$svc" --task-definition "$TD" \
+              --query 'service.serviceName' --output text
+            echo "$svc $TD" >> "$RUNNER_TEMP/deployed.txt"
+          done
+
+      - name: Wait for services to stabilize
+        run: |
+          set -euo pipefail
+          for i in 1 2; do
+            if aws ecs wait services-stable --cluster "$CLUSTER" \
+                 --services "$API_SERVICE" "$WORKER_SERVICE" "$WEB_SERVICE"; then break; fi
+            [ "$i" = 2 ] && { echo "::error::Services did not stabilize"; exit 1; }
+          done
+          # The circuit breaker may have rolled back to the previous revision, which also reads as "stable".
+          FAILED=0
+          while read -r svc td; do
+            RUNNING=$(aws ecs describe-services --cluster "$CLUSTER" --services "$svc" \
+              --query "services[0].deployments[?status=='PRIMARY'] | [0].[taskDefinition, rolloutState]" --output text)
+            echo "$svc: $RUNNING"
+            if [ "$(echo "$RUNNING" | awk '{print $1}')" != "$td" ] || [ "$(echo "$RUNNING" | awk '{print $2}')" != "COMPLETED" ]; then
+              echo "::error::$svc is not running $td (rolled back?)"; FAILED=1
+            fi
+          done < "$RUNNER_TEMP/deployed.txt"
+          exit $FAILED
+
+      - name: Summary
+        if: success()
+        run: |
+          {
+            echo "### Deployed \`${IMAGE_TAG}\` to ${DEPLOY_ENV}"
+            echo ""
+            echo "| Service | Task definition |"
+            echo "|---|---|"
+            while read -r svc td; do echo "| $svc | \`${td##*/}\` |"; done < "$RUNNER_TEMP/deployed.txt"
+          } >> "$GITHUB_STEP_SUMMARY"
