@@ -1,7 +1,7 @@
 import type { ModelMessage } from "ai";
 import { and, desc, eq } from "drizzle-orm";
-import { withTenant } from "@we360/db";
-import { type AgentConfig, conversations, executionSteps, executions, messages } from "@we360/db/schema";
+import { type Tx, withTenant } from "@we360/db";
+import { type AgentConfig, conversations, executionSteps, executions, messages, usageRecords } from "@we360/db/schema";
 import { AppError } from "../../lib/errors";
 import { errSummary, logger } from "../../lib/logger";
 import { runAgentLoop, UNTRUSTED_DATA_NOTICE } from "../../runtime/runner";
@@ -11,7 +11,7 @@ import { type AiModel, getDefaultChatModel, getModel } from "../models/catalog";
 import { type BillingSource, resolveChatModel } from "../models/gateway";
 import { type RetrievedChunk, searchKnowledge } from "../knowledge/retrieval";
 import { getOrgLimits } from "../plans/plan-limits";
-import { assertCanRun, recordUsage } from "../usage/usage.service";
+import { assertCanRun, usageRow } from "../usage/usage.service";
 
 export type RunSource = "playground" | "hosted_page" | "web_widget" | "api";
 
@@ -97,16 +97,14 @@ function textFromContent(content: unknown): string {
   return (content as { text?: string } | null)?.text ?? "";
 }
 
-async function loadHistory(orgId: string, conversationId: string, limit: number): Promise<ModelMessage[]> {
+async function loadHistory(tx: Tx, conversationId: string, limit: number): Promise<ModelMessage[]> {
   if (limit === 0) return [];
-  const rows = await withTenant(orgId, (tx) =>
-    tx
-      .select({ role: messages.role, content: messages.content })
-      .from(messages)
-      .where(eq(messages.conversationId, conversationId))
-      .orderBy(desc(messages.createdAt))
-      .limit(limit),
-  );
+  const rows = await tx
+    .select({ role: messages.role, content: messages.content })
+    .from(messages)
+    .where(eq(messages.conversationId, conversationId))
+    .orderBy(desc(messages.createdAt))
+    .limit(limit);
   return rows
     .reverse()
     .filter((r) => r.role === "user" || r.role === "assistant")
@@ -134,9 +132,11 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
   const { params: p, model, billingSource, languageModel } = prep;
   const started = Date.now();
 
-  // Conversation (must belong to this agent) and the user's message.
+  // Conversation (must belong to this agent), its history and the user's message, in one transaction:
+  // the database may be far away, so every round trip counts.
   const { conversationId, executionId, history } = await withTenant(p.orgId, async (tx) => {
     let convId = p.conversationId;
+    let continuing = false;
     if (convId) {
       // A conversation can only be continued on the same agent and the same deployment, and on the
       // public chat page / widget only by the visitor who started it (its history is sent to the model).
@@ -149,6 +149,7 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
           rows.filter((r) => (r.deploymentId ?? undefined) === p.deploymentId && (!isPublic || (r.endUserRef ?? undefined) === p.endUserRef)),
         );
       if (!conv) convId = undefined;
+      else continuing = true;
     }
     if (!convId) {
       const [conv] = await tx
@@ -180,12 +181,11 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
         inputPreview: p.input.slice(0, 500),
       })
       .returning({ id: executions.id });
-    return { conversationId: convId, executionId: exec!.id, history: [] as ModelMessage[] };
+    // A new conversation has no history yet: skip the query.
+    const past = continuing ? await loadHistory(tx, convId, p.config.memory.maxHistoryMessages) : [];
+    await tx.insert(messages).values({ orgId: p.orgId, conversationId: convId, role: "user", content: { text: p.input }, executionId: exec!.id });
+    return { conversationId: convId, executionId: exec!.id, history: past };
   });
-  history.push(...(await loadHistory(p.orgId, conversationId, p.config.memory.maxHistoryMessages)));
-  await withTenant(p.orgId, (tx) =>
-    tx.insert(messages).values({ orgId: p.orgId, conversationId, role: "user", content: { text: p.input }, executionId }),
-  );
 
   yield { type: "run.started", executionId, conversationId };
 
@@ -195,6 +195,7 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
     steps.push({ ...s, orgId: p.orgId, executionId, seq: ++seq });
   const citations = new Map<string, string>();
   let totalCost = 0;
+  const usageRows: Array<typeof usageRecords.$inferInsert> = [];
 
   try {
     let knowledgeContext: string | undefined;
@@ -238,7 +239,8 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
       if (ev.type === "text.delta") {
         yield ev;
       } else if (ev.type === "llm.step") {
-        const cost = await recordUsage({
+        // Written with the run's final transaction (one round trip less per model step).
+        const { row: usage, cost } = usageRow({
           orgId: p.orgId,
           workspaceId: p.workspaceId,
           agentId: p.agentId,
@@ -249,6 +251,7 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
           inputTokens: ev.inputTokens,
           outputTokens: ev.outputTokens,
         });
+        usageRows.push(usage);
         totalCost += cost;
         addStep({
           type: "llm",
@@ -289,6 +292,7 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
 
     await withTenant(p.orgId, async (tx) => {
       if (steps.length) await tx.insert(executionSteps).values(steps);
+      if (usageRows.length) await tx.insert(usageRecords).values(usageRows);
       await tx.insert(messages).values({ orgId: p.orgId, conversationId, role: "assistant", content: { text, citations: citationList }, executionId });
       await tx
         .update(executions)
@@ -320,6 +324,8 @@ export async function* streamRun(prep: PreparedRun): AsyncGenerator<ClientEvent>
     const fallback = p.config.messages.fallback;
     await withTenant(p.orgId, async (tx) => {
       if (steps.length) await tx.insert(executionSteps).values(steps);
+      // Tokens already spent are still billed.
+      if (usageRows.length) await tx.insert(usageRecords).values(usageRows);
       await tx
         .update(executions)
         .set({

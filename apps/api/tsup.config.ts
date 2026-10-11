@@ -7,8 +7,8 @@ export default defineConfig({
     // Loaded by the worker as a thread (new URL("./parse-worker.js", import.meta.url)), so it must sit next to worker.js.
     "parse-worker": "src/modules/knowledge/parse-worker.ts",
     "scripts/create-admin": "src/scripts/create-admin.ts",
-    "scripts/db-init": "src/scripts/db-init.ts",
     "scripts/migrate": "src/scripts/migrate.ts",
+    "scripts/table-counts": "src/scripts/table-counts.ts",
     "scripts/seed": "src/scripts/seed.ts",
   },
   format: ["esm"],

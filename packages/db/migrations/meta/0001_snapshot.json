@@ -1,6 +1,6 @@
 {
-  "id": "37e4590b-8e68-440f-bdcf-66011a1dd3e7",
-  "prevId": "b6b31682-b91c-4828-ae42-59972ef351de",
+  "id": "3a01b787-2cce-4eb5-a7c3-4831f1edc5c0",
+  "prevId": "8f344d13-ab36-4513-804e-49c8a875925a",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -412,6 +412,13 @@
           "type": "jsonb",
           "primaryKey": false,
           "notNull": false
+        },
+        "conversation_retention_days": {
+          "name": "conversation_retention_days",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 365
         }
       },
       "indexes": {},
@@ -799,6 +806,149 @@
       "policies": {},
       "checkConstraints": {},
       "isRLSEnabled": false
+    },
+    "public.agent_templates": {
+      "name": "agent_templates",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "org_id": {
+          "name": "org_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "workspace_id": {
+          "name": "workspace_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "name": {
+          "name": "name",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "description": {
+          "name": "description",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "config": {
+          "name": "config",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "updated_at": {
+          "name": "updated_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "deleted_at": {
+          "name": "deleted_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "agent_templates_ws_idx": {
+          "name": "agent_templates_ws_idx",
+          "columns": [
+            {
+              "expression": "workspace_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        }
+      },
+      "foreignKeys": {
+        "agent_templates_org_id_organization_id_fk": {
+          "name": "agent_templates_org_id_organization_id_fk",
+          "tableFrom": "agent_templates",
+          "columnsFrom": [
+            "org_id"
+          ],
+          "tableTo": "organization",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "agent_templates_workspace_id_workspaces_id_fk": {
+          "name": "agent_templates_workspace_id_workspaces_id_fk",
+          "tableFrom": "agent_templates",
+          "columnsFrom": [
+            "workspace_id"
+          ],
+          "tableTo": "workspaces",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "cascade"
+        },
+        "agent_templates_created_by_user_id_fk": {
+          "name": "agent_templates_created_by_user_id_fk",
+          "tableFrom": "agent_templates",
+          "columnsFrom": [
+            "created_by"
+          ],
+          "tableTo": "user",
+          "columnsTo": [
+            "id"
+          ],
+          "onUpdate": "no action",
+          "onDelete": "set null"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "policies": {
+        "tenant_isolation": {
+          "name": "tenant_isolation",
+          "as": "PERMISSIVE",
+          "for": "ALL",
+          "to": [
+            "public"
+          ],
+          "using": "org_id = nullif(current_setting('app.org_id', true), '')::uuid",
+          "withCheck": "org_id = nullif(current_setting('app.org_id', true), '')::uuid"
+        }
+      },
+      "checkConstraints": {},
+      "isRLSEnabled": true
     },
     "public.agent_version_knowledge": {
       "name": "agent_version_knowledge",
@@ -1873,6 +2023,27 @@
             },
             {
               "expression": "last_message_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "conversations_end_user_idx": {
+          "name": "conversations_end_user_idx",
+          "columns": [
+            {
+              "expression": "org_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "end_user_ref",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -3121,6 +3292,21 @@
           "columns": [
             {
               "expression": "started_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "with": {},
+          "method": "btree",
+          "concurrently": false
+        },
+        "executions_conversation_idx": {
+          "name": "executions_conversation_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

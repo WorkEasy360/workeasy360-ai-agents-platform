@@ -1,5 +1,7 @@
 # Incident playbooks
 
+> **Not the current production setup.** This runbook describes the earlier ECS/RDS design. Production now runs on one EC2 instance with the shared Aurora cluster: see [deploy/README.md](../../deploy/README.md).
+
 Alarms go to the SNS topic `we360-agents-<env>-alerts`. Logs: CloudWatch `/ecs/we360-agents-<env>-{web,api,worker,migrate}`. Super admin: `https://<domain>/admin`. `P=we360-agents-<env>`.
 
 First, every time: say in the team channel who is handling it, note the start time, and check **System health** in super admin plus the ALB 5xx / target health alarms.

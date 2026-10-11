@@ -1,5 +1,7 @@
 # Deploy runbook
 
+> **Not the current production setup.** This runbook describes the earlier ECS/RDS design. Production now runs on one EC2 instance with the shared Aurora cluster: see [deploy/README.md](../../deploy/README.md).
+
 Terraform lives in `infra/terraform` (`envs/staging`, `envs/prod`, shared `modules/platform`). The pipeline is `.github/workflows/deploy.yml`. Names: `P=we360-agents-<env>`.
 
 ## First-time setup (staging first, then prod)

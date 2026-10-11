@@ -1,17 +1,17 @@
 import { config } from "dotenv";
-import { drizzle } from "drizzle-orm/node-postgres";
-import { migrate } from "drizzle-orm/node-postgres/migrator";
 import pg from "pg";
+import { runMigrations } from "./migrator";
 
 config({ path: "../../.env" });
 
-const url = process.env.DATABASE_URL_OWNER;
-if (!url) throw new Error("DATABASE_URL_OWNER is required to run migrations");
+// Migrations run as the schema owner (DATABASE_URL_ADMIN), never as the RLS-restricted app role.
+const url = process.env.DATABASE_URL_ADMIN;
+if (!url) throw new Error("DATABASE_URL_ADMIN (the schema owner) is required to run migrations");
+const schema = process.env.DB_SCHEMA ?? "agents";
 
 const pool = new pg.Pool({ connectionString: url, max: 1 });
 try {
-  await migrate(drizzle(pool), { migrationsFolder: "./migrations" });
-  console.log("Migrations applied");
+  console.log(`Applied ${await runMigrations(pool, "./migrations", schema)} migration(s) in schema ${schema}`);
 } finally {
   await pool.end();
 }

@@ -1,20 +1,16 @@
+# Build the api and web images on GitHub, push them to GHCR, then roll them out on the EC2 host over SSH.
+# The host never builds (it is too small, and builds from the OneDrive folder fail) and never holds source
+# code: it receives only deploy/ and the migrations, and keeps its own deploy/.env.
+#
+# Runs after CI (tests, audit, secret scan, migration check) passed for a push to main. CI skips docs-only
+# pushes, so they don't deploy. One rollout at a time.
+# Rollback: Actions -> Deploy -> an earlier successful run -> "Re-run all jobs" (redeploys that commit's
+# images; migrations are not reversed, so they must stay compatible with the previous release).
+#
+# Repository settings this needs (Settings -> Secrets and variables -> Actions):
+#   secrets:   EC2_HOST (the Elastic IP), EC2_USER (ubuntu), EC2_SSH_KEY (private deploy key)
+#   variables: DOMAIN (public hostname, e.g. 13-201-45-67.sslip.io)
 name: Deploy
-
-# Deploys main to the EC2 instance after CI (tests, audit, secret scan) passes for that commit.
-# Also runnable by hand (Actions -> Deploy -> Run workflow).
-#
-# 1. Builds the api and web images, tagged with the commit SHA, and pushes them to ECR (skipped if the tag exists).
-# 2. Sends infra/ec2 to the instance through AWS SSM (no SSH) and runs bootstrap.sh + deploy.sh there:
-#    database setup, migrations, seed, restart, health checks, automatic rollback if unhealthy.
-# 3. Checks the public site over HTTPS.
-#
-# Configuration lives in the "production" GitHub Environment (Settings -> Environments -> production -> Variables):
-#   AWS_DEPLOY_ROLE_ARN  Terraform output github_deploy_role_arn (infra/terraform/envs/ec2)
-#   EC2_INSTANCE_ID      e.g. i-0123456789abcdef0
-#   APP_SECRET_ID        Terraform output app_secret_id
-#   APP_DOMAIN           e.g. agents.workeasy360.com (DNS A record -> the instance's Elastic IP)
-#   AWS_REGION           optional, default ap-south-1
-# Until they are set, the job finishes without deploying. See docs/runbooks/ec2-deploy.md.
 
 on:
   workflow_run:
@@ -23,155 +19,126 @@ on:
     branches: [main]
   workflow_dispatch:
 
-permissions:
-  id-token: write
-  contents: read
-
 concurrency:
   group: deploy-production
   cancel-in-progress: false
 
+permissions:
+  contents: read
+  packages: write
+
+env:
+  # The commit CI tested (workflow_run), or the selected ref (manual run).
+  SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+
 jobs:
-  deploy:
+  build:
+    name: Build ${{ matrix.name }}
     if: github.event_name == 'workflow_dispatch' || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
     runs-on: ubuntu-latest
-    timeout-minutes: 60
-    environment: production
-    env:
-      AWS_REGION: ${{ vars.AWS_REGION || 'ap-south-1' }}
-      # The commit CI tested (workflow_run), or the selected ref (manual run).
-      IMAGE_TAG: ${{ github.event.workflow_run.head_sha || github.sha }}
-      ROLE_ARN: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
-      INSTANCE_ID: ${{ vars.EC2_INSTANCE_ID }}
-      APP_SECRET_ID: ${{ vars.APP_SECRET_ID }}
-      DOMAIN: ${{ vars.APP_DOMAIN }}
-
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          - name: api
+            file: apps/api/Dockerfile
+          - name: web
+            file: apps/web/Dockerfile
     steps:
-      - name: Check configuration
-        id: config
-        run: |
-          missing=()
-          [ -n "$ROLE_ARN" ] || missing+=(AWS_DEPLOY_ROLE_ARN)
-          [ -n "$INSTANCE_ID" ] || missing+=(EC2_INSTANCE_ID)
-          [ -n "$APP_SECRET_ID" ] || missing+=(APP_SECRET_ID)
-          [ -n "$DOMAIN" ] || missing+=(APP_DOMAIN)
-          if [ ${#missing[@]} -gt 0 ]; then
-            msg="Deploy skipped: set ${missing[*]} in the production GitHub Environment (see docs/runbooks/ec2-deploy.md)."
-            echo "::warning::$msg"; echo "$msg" >> "$GITHUB_STEP_SUMMARY"
-            echo "ready=false" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          # These values end up in a shell command on the instance: allow only plain characters.
-          [[ "$INSTANCE_ID" =~ ^i-[0-9a-f]{8,17}$ ]] || { echo "::error::EC2_INSTANCE_ID looks wrong"; exit 1; }
-          [[ "$DOMAIN" =~ ^[a-z0-9]([a-z0-9.-]*[a-z0-9])?$ ]] || { echo "::error::APP_DOMAIN must be a bare host name like agents.example.com"; exit 1; }
-          [[ "$APP_SECRET_ID" =~ ^[A-Za-z0-9/_+=.@:-]+$ ]] || { echo "::error::APP_SECRET_ID looks wrong"; exit 1; }
-          [[ "$AWS_REGION" =~ ^[a-z]{2}(-[a-z]+)+-[0-9]$ ]] || { echo "::error::AWS_REGION looks wrong"; exit 1; }
-          echo "ready=true" >> "$GITHUB_OUTPUT"
-
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: steps.config.outputs.ready == 'true'
         with:
-          ref: ${{ env.IMAGE_TAG }}
+          ref: ${{ env.SHA }}
 
-      - name: Configure AWS credentials (OIDC)
-        if: steps.config.outputs.ready == 'true'
-        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4
-        with:
-          role-to-assume: ${{ env.ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Log in to ECR
-        if: steps.config.outputs.ready == 'true'
-        id: ecr
-        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
-
-      - name: Check for existing images
-        if: steps.config.outputs.ready == 'true'
-        id: exists
+      - name: Check configuration
+        if: vars.DOMAIN == ''
         run: |
-          echo "REGISTRY=${{ steps.ecr.outputs.registry }}" >> "$GITHUB_ENV"
-          for repo in api web; do
-            name="we360-agents-${repo}"
-            if aws ecr describe-images --repository-name "$name" --image-ids imageTag="$IMAGE_TAG" >/dev/null 2>&1; then
-              echo "${repo}=true" >> "$GITHUB_OUTPUT"; echo "$name:$IMAGE_TAG exists, skipping build"
-            else
-              echo "${repo}=false" >> "$GITHUB_OUTPUT"
-            fi
-          done
+          echo "::error::Set the repository variable DOMAIN (Settings → Secrets and variables → Actions → Variables)"
+          exit 1
+
+      - name: Image name
+        id: image
+        # GHCR requires lowercase; the organization name may not be.
+        run: echo "prefix=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agents" >> "$GITHUB_OUTPUT"
 
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
-        if: steps.config.outputs.ready == 'true'
 
-      - name: Build and push api image
-        if: steps.config.outputs.ready == 'true' && steps.exists.outputs.api != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
-          file: apps/api/Dockerfile
+          file: ${{ matrix.file }}
           push: true
           provenance: false
-          tags: ${{ env.REGISTRY }}/we360-agents-api:${{ env.IMAGE_TAG }}
-          cache-from: type=gha,scope=api
-          cache-to: type=gha,mode=max,scope=api
-
-      - name: Build and push web image
-        if: steps.config.outputs.ready == 'true' && steps.exists.outputs.web != 'true'
-        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
-        with:
-          context: .
-          file: apps/web/Dockerfile
-          push: true
-          # NEXT_PUBLIC_* and the /api rewrite target are baked in at build time.
+          tags: |
+            ${{ steps.image.outputs.prefix }}-${{ matrix.name }}:${{ env.SHA }}
+            ${{ steps.image.outputs.prefix }}-${{ matrix.name }}:latest
+          # Links the package to this repository, so the workflow token can pull it.
+          labels: org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          # Web only (the api Dockerfile ignores them): baked into the browser bundle / the /api rewrite.
           build-args: |
             NEXT_PUBLIC_GOOGLE_LOGIN=${{ vars.NEXT_PUBLIC_GOOGLE_LOGIN || 'false' }}
             API_INTERNAL_URL=http://api:4000
-          provenance: false
-          tags: ${{ env.REGISTRY }}/we360-agents-web:${{ env.IMAGE_TAG }}
-          cache-from: type=gha,scope=web
-          cache-to: type=gha,mode=max,scope=web
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
 
-      - name: Deploy on EC2 (SSM)
-        if: steps.config.outputs.ready == 'true'
+  deploy:
+    name: Deploy to EC2
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ env.SHA }}
+
+      - name: Configure SSH
+        env:
+          EC2_HOST: ${{ secrets.EC2_HOST }}
+          EC2_SSH_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
-          set -euo pipefail
-          # The bundle holds only scripts and config templates; secrets are read on the instance.
-          B64=$(tar -czf - -C infra/ec2 . | base64 -w0)
-          jq -n --arg b64 "$B64" --arg args "$IMAGE_TAG $REGISTRY $APP_SECRET_ID $AWS_REGION $DOMAIN" '{
-            commands: [
-              "mkdir -p /opt/we360",
-              ("echo " + $b64 + " | base64 -d | tar -xzf - -C /opt/we360"),
-              "bash /opt/we360/bootstrap.sh",
-              ("bash /opt/we360/deploy.sh " + $args)
-            ],
-            executionTimeout: ["2400"]
-          }' > "$RUNNER_TEMP/ssm-params.json"
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$EC2_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -T 20 -H "$EC2_HOST" >> ~/.ssh/known_hosts 2>/dev/null
+          test -s ~/.ssh/known_hosts || { echo "::error::Could not reach $EC2_HOST on port 22 (the security group must allow 22 from GitHub Actions)"; exit 1; }
 
-          CMD_ID=$(aws ssm send-command --instance-ids "$INSTANCE_ID" --document-name AWS-RunShellScript \
-            --comment "deploy ${IMAGE_TAG:0:12}" --timeout-seconds 600 \
-            --parameters "file://$RUNNER_TEMP/ssm-params.json" --query Command.CommandId --output text)
-          echo "SSM command: $CMD_ID"
+      - name: Ship deploy files and migrations
+        env:
+          TARGET: ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}
+        # deploy/.env is not in the repository, so the host's copy is never overwritten.
+        run: |
+          tar -czf - deploy packages/db/migrations \
+            | ssh -i ~/.ssh/deploy_key "$TARGET" 'mkdir -p ~/agents && tar -xzf - -C ~/agents'
 
-          STATUS=Pending
-          for _ in $(seq 1 170); do
-            sleep 15
-            STATUS=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-              --query Status --output text 2>/dev/null || echo Pending)
-            case "$STATUS" in Pending|InProgress|Delayed) continue ;; *) break ;; esac
+      - name: Roll out
+        env:
+          TARGET: ${{ secrets.EC2_USER }}@${{ secrets.EC2_HOST }}
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ACTOR: ${{ github.actor }}
+        # The short-lived workflow token lets the host pull the images; it is removed when the rollout ends.
+        run: |
+          prefix="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/agents"
+          printf '%s' "$TOKEN" | ssh -i ~/.ssh/deploy_key "$TARGET" "docker login ghcr.io -u '$ACTOR' --password-stdin" >/dev/null
+          status=0
+          ssh -i ~/.ssh/deploy_key "$TARGET" \
+            "cd ~/agents/deploy && PULL=1 IMAGE_PREFIX='$prefix' IMAGE_TAG='${SHA}' bash scripts/deploy.sh" || status=$?
+          ssh -i ~/.ssh/deploy_key "$TARGET" 'docker logout ghcr.io >/dev/null' || true
+          exit $status
+
+      - name: Smoke test
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS "https://${{ vars.DOMAIN }}/api/health" && curl -fsS -o /dev/null "https://${{ vars.DOMAIN }}/login"; then
+              echo; echo "### Deployed \`${SHA:0:12}\` to https://${{ vars.DOMAIN }}" >> "$GITHUB_STEP_SUMMARY"
+              echo "Live: https://${{ vars.DOMAIN }}"; exit 0
+            fi
+            sleep 6
           done
-
-          echo "--- output from the instance ---"
-          aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-            --query StandardOutputContent --output text || true
-          ERR=$(aws ssm get-command-invocation --command-id "$CMD_ID" --instance-id "$INSTANCE_ID" \
-            --query StandardErrorContent --output text || true)
-          [ -n "$ERR" ] && { echo "--- stderr ---"; echo "$ERR"; }
-          if [ "$STATUS" != "Success" ]; then
-            echo "::error::Deploy on the instance ended with status $STATUS"; exit 1
-          fi
-
-      - name: Check the public site
-        if: steps.config.outputs.ready == 'true'
-        run: |
-          # The first deploy may need a minute for Caddy to get the HTTPS certificate.
-          curl -fsS --retry 12 --retry-delay 10 --retry-all-errors --max-time 15 "https://$DOMAIN/api/auth/ok" > /dev/null
-          curl -fsS --retry 6 --retry-delay 5 --retry-all-errors --max-time 15 -o /dev/null "https://$DOMAIN/"
-          echo "### Deployed \`${IMAGE_TAG:0:12}\` to https://$DOMAIN" >> "$GITHUB_STEP_SUMMARY"
+          echo "::error::Site did not answer after the rollout"; exit 1

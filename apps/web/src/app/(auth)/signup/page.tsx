@@ -3,14 +3,16 @@
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-import { Button, Card, FormError, Input, Label } from "@/components/ui";
+import { Button, Card, FormError, Input, Label, Notice } from "@/components/ui";
 import { authClient } from "@/lib/auth-client";
 import { GoogleButton } from "@/components/google-button";
+import { usePlatform } from "@/lib/use-platform";
 
 export default function SignupPage() {
   const router = useRouter();
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const { data: platform } = usePlatform();
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -31,6 +33,11 @@ export default function SignupPage() {
     <Card>
       <h1 className="mb-1 text-xl font-semibold">Create your account</h1>
       <p className="mb-6 text-sm text-[var(--muted)]">Build your first AI agent in minutes.</p>
+      {platform && !platform.signupOpen && (
+        <div className="mb-4">
+          <Notice>Sign-up is by invitation. Use the email address your invitation was sent to.</Notice>
+        </div>
+      )}
       <form onSubmit={onSubmit} className="space-y-4">
         <div>
           <Label htmlFor="name">Your name</Label>

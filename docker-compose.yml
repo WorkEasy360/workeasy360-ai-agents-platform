@@ -1,18 +1,22 @@
-# Local development services. Production uses RDS, ElastiCache, S3 and SES in ap-south-1.
+# Local development services. Production uses the shared Aurora cluster (schema `agents`), Redis on the EC2 host, S3 and SES.
 services:
   postgres:
-    image: pgvector/pgvector:pg16
+    # Same major version as the production Aurora cluster (PostgreSQL 18).
+    image: pgvector/pgvector:0.8.1-pg18
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: postgres
-      POSTGRES_DB: we360_agents
     ports:
       - "5433:5432"  # 5433 avoids clashing with a locally installed Postgres
     volumes:
-      - pgdata:/var/lib/postgresql/data
-      - ./infra/docker/postgres-init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+      # PostgreSQL 18 images keep data under /var/lib/postgresql/<major>. New volume name: the old
+      # PostgreSQL 16 volume (pgdata) can't be opened by 18 and is left as it is.
+      - pgdata18:/var/lib/postgresql
+      # Same role/schema setup as production: schema `agents`, roles agents_owner and agents_app.
+      - ./infra/docker/postgres-init.sh:/docker-entrypoint-initdb.d/01-init.sh:ro
+      - ./deploy/sql:/deploy-sql:ro
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres -d we360_agents"]
+      test: ["CMD-SHELL", "pg_isready -U postgres -d postgres"]
       interval: 5s
       retries: 10
 
@@ -35,12 +39,7 @@ services:
     volumes:
       - s3data:/data
 
-  mailpit:
-    image: axllent/mailpit:latest
-    ports:
-      - "1025:1025"
-      - "8025:8025"
 
 volumes:
-  pgdata:
+  pgdata18:
   s3data:

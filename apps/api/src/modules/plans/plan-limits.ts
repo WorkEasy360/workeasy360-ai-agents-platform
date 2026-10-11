@@ -1,12 +1,27 @@
 import { eq } from "drizzle-orm";
 import { appDb } from "@we360/db";
 import { organization, plans, type PlanLimits } from "@we360/db/schema";
+import { ttlCache } from "../../lib/ttl-cache";
 
 /**
  * Effective limits for an organization: its plan's limits with any per-org overrides
  * (set by the super admin) applied on top. `null` means unlimited.
  */
-export async function getOrgLimits(orgId: string): Promise<PlanLimits> {
+// Read on most requests; plan changes are rare. Admin edits clear it (clearOrgLimits); the TTL bounds
+// staleness in other processes.
+const cache = ttlCache<string, PlanLimits>(30_000);
+
+/** Call after changing an organization's plan or overrides (orgId), or any plan's limits (no argument). */
+export function clearOrgLimits(orgId?: string): void {
+  if (orgId) cache.delete(orgId);
+  else cache.clear();
+}
+
+export function getOrgLimits(orgId: string): Promise<PlanLimits> {
+  return cache.get(orgId, () => loadOrgLimits(orgId));
+}
+
+async function loadOrgLimits(orgId: string): Promise<PlanLimits> {
   const [row] = await appDb()
     .select({ limits: plans.limits, overrides: organization.planOverrides })
     .from(organization)

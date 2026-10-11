@@ -9,6 +9,7 @@ import { auth } from "./auth/auth";
 import { env } from "./config/env";
 import { AppError, errorHandler, notFoundHandler } from "./lib/errors";
 import { logger, serializeRequest, serializeResponse } from "./lib/logger";
+import { redis } from "./lib/queue";
 import { rateLimit } from "./lib/rate-limit";
 import { adminRouter } from "./modules/admin/admin.routes";
 import { agentsRouter } from "./modules/agents/agents.routes";
@@ -47,16 +48,21 @@ export function createApp() {
     pinoHttp({
       logger,
       genReqId: (req) => (req as express.Request).id,
-      autoLogging: { ignore: (req) => req.url === "/healthz" },
+      autoLogging: { ignore: (req) => req.url === "/healthz" || req.url === "/api/health" },
       // Allow-listed headers, tokens stripped from URLs, shortened IPs (see serializeRequest).
       serializers: { req: serializeRequest, res: serializeResponse },
     }),
   );
 
-  app.get("/healthz", async (_req, res) => {
-    await appDb().execute(sql`select 1`);
-    res.json({ status: "ok" });
-  });
+  // Readiness: 503 unless the database and Redis both answer. Used by the container healthcheck and the
+  // deploy's smoke test (/api/health through nginx). /healthz is the same check, kept for older probes.
+  const health: express.RequestHandler = async (_req, res) => {
+    const timeout = <T,>(p: Promise<T>) => Promise.race([p, new Promise<never>((_, reject) => setTimeout(() => reject(new Error("timeout")), 5_000))]);
+    const [db, cache] = await Promise.allSettled([timeout(appDb().execute(sql`select 1`)), timeout(redis().ping())]);
+    const ok = db.status === "fulfilled" && cache.status === "fulfilled";
+    res.status(ok ? 200 : 503).json({ status: ok ? "ok" : "unavailable", database: db.status === "fulfilled" ? "ok" : "unreachable", redis: cache.status === "fulfilled" ? "ok" : "unreachable" });
+  };
+  app.get(["/api/health", "/healthz"], health);
 
   // Brute-force protection on credential endpoints, shared across API instances via Redis.
   app.use(

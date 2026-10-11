@@ -5,6 +5,7 @@ import { appDb, withTenant } from "@we360/db";
 import { member, organization, workspaces } from "@we360/db/schema";
 import { auth } from "../auth/auth";
 import { AppError } from "../lib/errors";
+import { ttlCache } from "../lib/ttl-cache";
 import type { OrgRole } from "../types/express";
 
 /** Requires a signed-in user. Sets `req.auth`. */
@@ -14,6 +15,8 @@ export const requireSession: RequestHandler = async (req, _res, next) => {
   req.auth = session;
   next();
 };
+
+const defaultWorkspace = ttlCache<string, string | undefined>(10 * 60_000);
 
 /**
  * Resolves the active organization for the request and sets `req.tenant`.
@@ -39,15 +42,19 @@ export const requireTenant: RequestHandler = async (req, _res, next) => {
     return next(AppError.forbidden("This organization is suspended. Contact support.", "organization_suspended"));
   }
 
-  const workspaceId = await withTenant(orgId, async (tx) => {
-    const [ws] = await tx
-      .select({ id: workspaces.id })
-      .from(workspaces)
-      .where(isNull(workspaces.deletedAt))
-      .orderBy(asc(workspaces.createdAt))
-      .limit(1);
-    return ws?.id;
-  });
+  // Membership and status are checked on every request (above); the default workspace never changes, so
+  // it is cached (saves a transaction per request with the database in another region).
+  const workspaceId = await defaultWorkspace.get(orgId, () =>
+    withTenant(orgId, async (tx) => {
+      const [ws] = await tx
+        .select({ id: workspaces.id })
+        .from(workspaces)
+        .where(isNull(workspaces.deletedAt))
+        .orderBy(asc(workspaces.createdAt))
+        .limit(1);
+      return ws?.id;
+    }),
+  );
   if (!workspaceId) return next(new AppError(500, "workspace_missing", "Organization has no workspace."));
 
   req.tenant = { orgId, workspaceId, role: row.role as OrgRole, planKey: row.planKey };

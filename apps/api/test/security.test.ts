@@ -214,3 +214,31 @@ describe("public endpoints", () => {
     expect(pub.body).not.toHaveProperty("plan");
   });
 });
+
+describe("token types can't stand in for one another", () => {
+  it("API keys, session cookies and public deployment keys only work where they belong", async () => {
+    const who = await signUpWithOrg("sec-tokens");
+    cleanup.push(who);
+    await adminDb().update(organization).set({ planKey: "business" }).where(eq(organization.id, who.orgId)); // the API channel is a paid feature
+    const h = (r: request.Test) => r.set("Origin", ORIGIN).set("x-org-id", who.orgId);
+    const a = await h(who.agent.post("/api/v1/agents")).send({ name: "Bot", draft: { instructions: "Be nice." } });
+    await h(who.agent.post(`/api/v1/agents/${a.body.id}/publish`)).send({});
+    const key = (await h(who.agent.post("/api/v1/api-keys")).send({ name: "t" })).body.secret as string;
+    const dep = (await h(who.agent.post(`/api/v1/agents/${a.body.id}/deployments`)).send({ channel: "hosted_page" })).body.publicKey as string;
+    await h(who.agent.post(`/api/v1/agents/${a.body.id}/deployments`)).send({ channel: "api" });
+    const sessionToken = /better-auth\.session_token=([^;]+)/.exec(String((await request(app).post("/api/auth/sign-in/email").set("Origin", ORIGIN).send({ email: who.email, password: "correct-horse-battery" })).headers["set-cookie"]))?.[1];
+    expect(sessionToken).toBeDefined();
+
+    // An API key is not a session: the dashboard API and the auth API reject it.
+    expect((await request(app).get("/api/v1/agents").set("Authorization", `Bearer ${key}`).set("x-org-id", who.orgId)).status).toBe(401);
+    expect((await request(app).get("/api/auth/get-session").set("Authorization", `Bearer ${key}`)).body).toBeNull();
+    // A session token or a public key is not an API key.
+    const run = (auth: string) => request(app).post(`/api/v1/runs/agents/${a.body.id}`).set("Authorization", auth).send({ message: "hi" });
+    expect((await run(`Bearer ${decodeURIComponent(sessionToken!)}`)).status).toBe(401);
+    expect((await run(`Bearer ${dep}`)).status).toBe(401);
+    // A signed-in browser session doesn't authenticate the developer API either.
+    expect((await who.agent.post(`/api/v1/runs/agents/${a.body.id}`).set("Origin", ORIGIN).send({ message: "hi" })).status).toBe(401);
+    // The API key does work where it belongs.
+    expect((await run(`Bearer ${key}`)).status).toBe(200);
+  });
+});

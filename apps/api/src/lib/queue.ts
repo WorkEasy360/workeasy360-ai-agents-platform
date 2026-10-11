@@ -83,7 +83,22 @@ export async function enqueueFileCleanup(prefix: string) {
   await getMaintenanceQueue().add("files-cleanup", { prefix }, { attempts: 5, backoff: { type: "exponential", delay: 30_000 }, removeOnComplete: 100 });
 }
 
+/** Outgoing email (see lib/mailer.ts). Job data is the message; the job name is its kind. */
+export interface EmailJob {
+  to: string;
+  subject: string;
+  text: string;
+}
+
+let emailQueue: Queue<EmailJob> | undefined;
+
+export function getEmailQueue(): Queue<EmailJob> {
+  emailQueue ??= new Queue<EmailJob>("email", { connection: redis(), prefix: QUEUE_PREFIX });
+  return emailQueue;
+}
+
 export async function closeQueues() {
+  await emailQueue?.close();
   await maintenanceQueue?.close();
   await ingestQueue?.close();
   await runsQueue?.close();

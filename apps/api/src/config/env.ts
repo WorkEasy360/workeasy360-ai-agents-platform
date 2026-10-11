@@ -13,11 +13,25 @@ const schema = z.object({
     .refine((v) => !/change-me/i.test(v), "BETTER_AUTH_SECRET is still the .env.example placeholder; generate a random value"),
   GOOGLE_CLIENT_ID: z.string().optional().default(""),
   GOOGLE_CLIENT_SECRET: z.string().optional().default(""),
-  SMTP_HOST: z.string().default("localhost"),
-  SMTP_PORT: z.coerce.number().default(1025),
-  SMTP_USER: z.string().optional().default(""),
-  SMTP_PASSWORD: z.string().optional().default(""),
-  EMAIL_FROM: z.string().default("WorkEasy360 Agents <no-reply@localhost>"),
+  // Email: Amazon SES (credentials from the EC2 instance role) when SES_REGION is set; otherwise email is
+  // off in production and printed to the log in development. MAIL_TRANSPORT overrides the choice.
+  SES_REGION: z.string().optional().default(""),
+  MAIL_TRANSPORT: z.enum(["ses", "log", "off"]).optional(),
+  MAIL_FROM: z.string().default("WorkEasy360 Agents <no-reply@localhost>"),
+  // Times in emails (e.g. when an invitation expires) are shown in this timezone.
+  APP_TIMEZONE: z
+    .string()
+    .default("Asia/Kolkata")
+    .refine((tz) => {
+      try {
+        new Intl.DateTimeFormat("en", { timeZone: tz });
+        return true;
+      } catch {
+        return false;
+      }
+    }, "APP_TIMEZONE must be an IANA timezone such as Asia/Kolkata"),
+  // false: only people with a pending invitation can create an account (platform staff use the admin CLI).
+  ALLOW_PUBLIC_SIGNUP: z.enum(["true", "false"]).optional(),
   ADMIN_REQUIRE_2FA: z
     .enum(["true", "false"])
     .optional()
@@ -61,9 +75,19 @@ if (problems.length) {
   process.exit(1);
 }
 
+const mailTransport = parsed.data.MAIL_TRANSPORT ?? (parsed.data.SES_REGION ? "ses" : parsed.data.NODE_ENV === "production" ? "off" : "log");
+if (mailTransport === "ses" && !parsed.data.SES_REGION) {
+  console.error("Invalid environment configuration:\n- MAIL_TRANSPORT=ses needs SES_REGION.");
+  process.exit(1);
+}
+
 export const env = {
   ...parsed.data,
   isProduction: parsed.data.NODE_ENV === "production",
+  mailTransport,
+  emailEnabled: mailTransport !== "off",
+  // Closed by default in production (decided for launch); open in development and tests.
+  allowPublicSignup: (parsed.data.ALLOW_PUBLIC_SIGNUP ?? (parsed.data.NODE_ENV === "production" ? "false" : "true")) === "true",
   // Super admins must use 2FA in production; local dev may opt out.
   adminRequire2fa: parsed.data.ADMIN_REQUIRE_2FA ?? parsed.data.NODE_ENV === "production",
 };

@@ -27,7 +27,7 @@ Architecture and launch plan: [docs/architecture/agent-platform-blueprint.md](do
 | Web (`apps/web`) | Next.js 16, React 19, Tailwind CSS 4, TanStack Query |
 | API and worker (`apps/api`) | Node.js 22, Express 5, Better Auth, AI SDK 7, BullMQ, Zod |
 | Database (`packages/db`) | PostgreSQL 16 + pgvector, Drizzle ORM, row-level security |
-| Local services | Docker Compose: Postgres, Redis, S3Mock, Mailpit |
+| Local services | Docker Compose: Postgres 18 + pgvector, Redis, S3Mock |
 
 ## Local setup
 
@@ -36,14 +36,14 @@ Prerequisites: Node 22+, pnpm 10+, Docker Desktop.
 ```bash
 pnpm install
 cp .env.example .env            # set BETTER_AUTH_SECRET and LOCAL_MASTER_KEY (commands are in the file)
-pnpm services:up                # Postgres :5433, Redis :6379, S3Mock :9090, Mailpit :8025
+pnpm services:up                # Postgres :5433, Redis :6379, S3Mock :9090
 pnpm db:migrate
 pnpm db:seed                    # plans, model catalog, feature flags
 pnpm admin:create --email you@company.com --name "You" --password 'a-long-password'
 pnpm dev                        # web :3000, API :4000, background worker
 ```
 
-- Open http://localhost:3000 to sign up. Emails go to Mailpit at http://localhost:8025.
+- Open http://localhost:3000 to sign up. Emails are printed by the worker (`MAIL_TRANSPORT=log`) instead of being sent; links in them work locally.
 - **No AI keys needed locally:** with `MOCK_LLM=true` a built-in mock model and mock embeddings stand in for the providers, so every flow works offline. To use real models, set `MOCK_LLM=false` and add `OPENAI_API_KEY` / `ANTHROPIC_API_KEY` / `GOOGLE_GENERATIVE_AI_API_KEY` (knowledge search uses OpenAI embeddings).
 - Postgres uses port **5433** so it doesn't clash with a locally installed Postgres.
 - Super admins need 2FA in production (Settings → Security). It's optional locally unless `ADMIN_REQUIRE_2FA=true`.
@@ -62,16 +62,17 @@ pnpm dev                        # web :3000, API :4000, background worker
 
 Every tenant table has `org_id` and a Postgres RLS policy.
 
+All tables live in schema `agents` (also locally and in CI), set up by [deploy/sql/01-create-roles-and-schema.sql](deploy/sql/01-create-roles-and-schema.sql). In production that schema sits in a database shared with other WorkEasy360 products.
+
 | Role | Used by | RLS |
 |---|---|---|
-| `postgres` (owner) | migrations only | n/a |
-| `we360_app` | API tenant requests and worker (`appDb()`, `withTenant()`) | **enforced** |
-| `we360_admin` | super admin API, retention job (`adminDb()`) | bypassed |
+| `agents_app` | API tenant requests and worker (`appDb()`, `withTenant()`) | **enforced** |
+| `agents_owner` | owns schema `agents`: migrations, super admin API, worker jobs (`adminDb()`) | doesn't apply to the owner |
 
 - Tenant queries run inside `withTenant(orgId, tx => ...)`, which sets `app.org_id` for that transaction.
 - API keys and public deployment keys are resolved before the tenant is known, through two narrow `SECURITY DEFINER` functions (migration `0001`).
 - `apps/api/test/tenant-isolation.test.ts` must stay green.
-- In RDS, create `we360_app` and `we360_admin` once using `infra/docker/postgres-init.sql` (with real passwords from Secrets Manager).
+- Migrations must not name a schema (`pnpm db:generate` strips drizzle's `"public".`; [deploy/scripts/check-migrations.sh](deploy/scripts/check-migrations.sh) fails CI otherwise).
 
 ## Tests and builds
 
@@ -79,17 +80,17 @@ Every tenant table has `org_id` and a Postgres RLS policy.
 pnpm typecheck
 pnpm test                      # API integration + unit tests (needs `pnpm services:up`)
 pnpm build
-docker build -f apps/api/Dockerfile -t we360-agents-api .   # API; worker = same image, `node dist/worker.js`
-docker build -f apps/web/Dockerfile -t we360-agents-web .
 ```
+
+Docker images are built only on GitHub Actions (building from the OneDrive folder fails with "unknown file mode").
 
 One-off tasks with the API image: `node dist/scripts/migrate.js` (migrations), `node dist/scripts/seed.js` (catalog, insert-only), `node dist/scripts/create-admin.js` (first super admin).
 
-## Deploying to AWS
+## Deploying
 
-**Current setup: one EC2 instance in Mumbai with an existing RDS/Aurora PostgreSQL database.** Every push to `main` deploys after CI passes ([.github/workflows/deploy.yml](.github/workflows/deploy.yml) → AWS SSM → [infra/ec2/deploy.sh](infra/ec2/deploy.sh)). One-time setup and operations: [docs/runbooks/ec2-deploy.md](docs/runbooks/ec2-deploy.md).
+Production is one EC2 instance in Mumbai plus the shared Aurora PostgreSQL cluster (schema `agents` only). Pushing to `main` deploys after CI passes: images are built on GitHub, pushed to GHCR and rolled out over SSH. Setup, operations and the rules for the shared database: [deploy/README.md](deploy/README.md).
 
-The earlier ECS/Fargate Terraform for staging and prod is still in [infra/terraform/envs](infra/terraform/envs) (see `deploy.md`) but is not used by the current workflow. None of the Terraform has been run against AWS yet: run `terraform fmt` / `validate` and review the plan before the first apply.
+The earlier ECS/Fargate Terraform in [infra/terraform](infra/terraform) is not used by this setup.
 
 ## Changing the auth schema
 

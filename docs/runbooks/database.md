@@ -1,5 +1,7 @@
 # Database runbook (RDS PostgreSQL 16)
 
+> **Not the current production setup.** This runbook describes the earlier ECS/RDS design. Production now runs on one EC2 instance with the shared Aurora cluster: see [deploy/README.md](../../deploy/README.md).
+
 Names below use `ENV=staging` (or `prod`) and `P=we360-agents-$ENV`. Region `ap-south-1`.
 
 | Role | Used by | RLS | Password lives in |

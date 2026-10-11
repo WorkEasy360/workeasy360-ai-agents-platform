@@ -1,30 +1,35 @@
-import { and, asc, eq } from "drizzle-orm";
+import { asc } from "drizzle-orm";
 import { appDb } from "@we360/db";
 import { aiModels } from "@we360/db/schema";
+import { ttlCache } from "../../lib/ttl-cache";
 
 export type AiModel = typeof aiModels.$inferSelect;
 export type ModelTier = "fast" | "balanced" | "premium";
 
+// The catalog is small and global: read it whole, at most once a minute per process (the database is far away).
+const catalog = ttlCache<"all", AiModel[]>(60_000);
+const allModels = () => catalog.get("all", () => appDb().select().from(aiModels).orderBy(asc(aiModels.provider), asc(aiModels.displayName)));
+
+/** Call after changing ai_models (admin catalog edits). */
+export function clearModelCache(): void {
+  catalog.clear();
+}
+
+/** Every catalog row, enabled or not (cached). */
+export function allCatalogModels(): Promise<AiModel[]> {
+  return allModels();
+}
+
 export async function listChatModels(): Promise<AiModel[]> {
-  return appDb()
-    .select()
-    .from(aiModels)
-    .where(and(eq(aiModels.isEnabled, true), eq(aiModels.kind, "chat")))
-    .orderBy(asc(aiModels.provider), asc(aiModels.displayName));
+  return (await allModels()).filter((m) => m.isEnabled && m.kind === "chat");
 }
 
 export async function getModel(id: string): Promise<AiModel | undefined> {
-  const [row] = await appDb().select().from(aiModels).where(eq(aiModels.id, id)).limit(1);
-  return row;
+  return (await allModels()).find((m) => m.id === id);
 }
 
 export async function getDefaultChatModel(): Promise<AiModel | undefined> {
-  const [row] = await appDb()
-    .select()
-    .from(aiModels)
-    .where(and(eq(aiModels.isDefault, true), eq(aiModels.kind, "chat"), eq(aiModels.isEnabled, true)))
-    .limit(1);
-  return row;
+  return (await allModels()).find((m) => m.isDefault && m.kind === "chat" && m.isEnabled);
 }
 
 /**
@@ -44,10 +49,7 @@ export async function getDefaultModelForTiers(tiers: ModelTier[], usableProvider
 }
 
 export async function getEmbeddingModels(): Promise<AiModel[]> {
-  return appDb()
-    .select()
-    .from(aiModels)
-    .where(and(eq(aiModels.kind, "embedding"), eq(aiModels.isEnabled, true)));
+  return (await allModels()).filter((m) => m.kind === "embedding" && m.isEnabled);
 }
 
 /** USD cost for a call, from catalog prices per million tokens. */

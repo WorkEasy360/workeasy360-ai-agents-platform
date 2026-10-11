@@ -3,6 +3,7 @@ import { and, eq } from "drizzle-orm";
 import { z } from "zod";
 import { withTenant } from "@we360/db";
 import { conversations, executions, messages } from "@we360/db/schema";
+import { env } from "../../config/env";
 import { AppError } from "../../lib/errors";
 import { openSse, parse } from "../../lib/http";
 import { rateLimit } from "../../lib/rate-limit";
@@ -17,6 +18,11 @@ import { prepareRun, streamRun, toPublicEvent } from "../runs/run.service";
  * by the browser via CSP frame-ancestors (set by the web app from `allowedOrigins`).
  */
 export const publicRouter = Router();
+
+/** What the sign-in pages need to know about this server (no secrets). */
+publicRouter.get("/platform", (_req, res) => {
+  res.json({ emailEnabled: env.emailEnabled, signupOpen: env.allowPublicSignup });
+});
 
 publicRouter.get("/deployments/:publicKey", async (req, res) => {
   const { deployment, agent, config } = await resolvePublicDeployment(String(req.params.publicKey));

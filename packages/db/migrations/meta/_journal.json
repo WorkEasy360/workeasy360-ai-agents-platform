@@ -5,29 +5,15 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1790923690573,
-      "tag": "0000_init",
+      "when": 1791695189642,
+      "tag": "0000_baseline",
       "breakpoints": true
     },
     {
       "idx": 1,
       "version": "7",
-      "when": 1790931129911,
+      "when": 1791695200415,
       "tag": "0001_lookup_functions",
-      "breakpoints": true
-    },
-    {
-      "idx": 2,
-      "version": "7",
-      "when": 1791465854742,
-      "tag": "0002_agent_templates",
-      "breakpoints": true
-    },
-    {
-      "idx": 3,
-      "version": "7",
-      "when": 1791571592850,
-      "tag": "0003_privacy_retention",
       "breakpoints": true
     }
   ]

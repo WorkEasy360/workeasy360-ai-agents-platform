@@ -1,7 +1,9 @@
-import { and, count, eq, gte, sql, sum } from "drizzle-orm";
+import { count, eq, sql, sum } from "drizzle-orm";
 import { type Tx, withTenant } from "@we360/db";
 import { agents, documents, executions, organization, plans, type PlanLimits, usageRecords } from "@we360/db/schema";
 import { AppError } from "../../lib/errors";
+import { errSummary, logger } from "../../lib/logger";
+import { notify } from "../notifications/notify";
 import { type AiModel, costUsd } from "../models/catalog";
 import type { BillingSource } from "../models/gateway";
 import { getOrgLimits } from "../plans/plan-limits";
@@ -10,7 +12,7 @@ export function monthStart(now = new Date()): Date {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1));
 }
 
-export async function recordUsage(u: {
+export interface UsageInput {
   orgId: string;
   workspaceId?: string;
   agentId?: string;
@@ -20,10 +22,14 @@ export async function recordUsage(u: {
   billingSource: BillingSource;
   inputTokens: number;
   outputTokens: number;
-}): Promise<number> {
+}
+
+/** The usage row and its cost, for callers that write it in their own transaction (see streamRun). */
+export function usageRow(u: UsageInput): { row: typeof usageRecords.$inferInsert; cost: number } {
   const cost = costUsd(u.model, u.inputTokens, u.outputTokens);
-  await withTenant(u.orgId, (tx) =>
-    tx.insert(usageRecords).values({
+  return {
+    cost,
+    row: {
       orgId: u.orgId,
       workspaceId: u.workspaceId,
       agentId: u.agentId,
@@ -35,8 +41,13 @@ export async function recordUsage(u: {
       inputTokens: u.inputTokens,
       outputTokens: u.outputTokens,
       costUsd: cost.toFixed(8),
-    }),
-  );
+    },
+  };
+}
+
+export async function recordUsage(u: UsageInput): Promise<number> {
+  const { row, cost } = usageRow(u);
+  await withTenant(u.orgId, (tx) => tx.insert(usageRecords).values(row));
   return cost;
 }
 
@@ -51,33 +62,24 @@ export interface UsageSummary {
 
 export async function getUsageSummary(orgId: string): Promise<UsageSummary> {
   const since = monthStart();
-  // Queries run one after another: a transaction's connection can't run them in parallel.
-  return withTenant(orgId, async (tx) => {
-    // Only real conversations count toward the plan; playground tests don't.
-    const [msgs] = await tx
-      .select({ n: count() })
-      .from(executions)
-      .where(and(gte(executions.startedAt, since), sql`${executions.source} <> 'playground'`));
-    const costs = await tx
-      .select({ source: usageRecords.billingSource, total: sum(usageRecords.costUsd) })
-      .from(usageRecords)
-      .where(gte(usageRecords.occurredAt, since))
-      .groupBy(usageRecords.billingSource);
-    const [agentCount] = await tx.select({ n: count() }).from(agents).where(sql`${agents.deletedAt} is null`);
-    const [storage] = await tx
-      .select({ bytes: sum(documents.sizeBytes) })
-      .from(documents)
-      .where(sql`${documents.deletedAt} is null`);
-    const cost = (s: string) => Number(costs.find((c) => c.source === s)?.total ?? 0);
-    return {
-      periodStart: since.toISOString(),
-      messages: msgs?.n ?? 0,
-      platformCreditsUsd: cost("platform"),
-      byokCostUsd: cost("byok"),
-      agents: agentCount?.n ?? 0,
-      storageMb: Number(storage?.bytes ?? 0) / (1024 * 1024),
-    };
-  });
+  // One statement instead of four: the database may be in another region. RLS still applies to every subquery.
+  const [row] = await withTenant(orgId, (tx) =>
+    tx.execute<{ messages: number; platform: string | null; byok: string | null; agents: number; bytes: string | null }>(sql`
+      select
+        (select count(*) from ${executions} where ${executions.startedAt} >= ${since} and ${executions.source} <> 'playground')::int as messages,
+        (select sum(${usageRecords.costUsd}) from ${usageRecords} where ${usageRecords.occurredAt} >= ${since} and ${usageRecords.billingSource} = 'platform') as platform,
+        (select sum(${usageRecords.costUsd}) from ${usageRecords} where ${usageRecords.occurredAt} >= ${since} and ${usageRecords.billingSource} = 'byok') as byok,
+        (select count(*) from ${agents} where ${agents.deletedAt} is null)::int as agents,
+        (select sum(${documents.sizeBytes}) from ${documents} where ${documents.deletedAt} is null) as bytes`),
+  ).then((r) => r.rows);
+  return {
+    periodStart: since.toISOString(),
+    messages: row?.messages ?? 0,
+    platformCreditsUsd: Number(row?.platform ?? 0),
+    byokCostUsd: Number(row?.byok ?? 0),
+    agents: row?.agents ?? 0,
+    storageMb: Number(row?.bytes ?? 0) / (1024 * 1024),
+  };
 }
 
 /**
@@ -92,6 +94,12 @@ export async function assertCanRun(orgId: string, opts: { source: string; billin
       "plan_limit_reached",
       `This organization has used all ${limits.messagesPerMonth} messages included this month. Upgrade to continue.`,
     );
+  }
+  if (opts.billingSource === "platform" && limits.platformCreditsUsdPerMonth) {
+    // Owners and admins get one email at 80% and one at 100% each month. Not awaited: it must not delay the run.
+    void notify
+      .usageAlert(orgId, { usedUsd: usage.platformCreditsUsd, limitUsd: limits.platformCreditsUsdPerMonth })
+      .catch((err: unknown) => logger.warn({ err: errSummary(err), orgId }, "usage alert failed"));
   }
   if (
     opts.billingSource === "platform" &&

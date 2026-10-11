@@ -1,0 +1,30 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "SendEmailAsTheAppSender",
+      "Effect": "Allow",
+      "Action": ["ses:SendEmail", "ses:SendRawEmail"],
+      "Resource": "*",
+      "Condition": { "StringEquals": { "ses:FromAddress": "REPLACE_MAIL_FROM_ADDRESS" } }
+    },
+    {
+      "Sid": "EncryptCustomerSecretsAndDocuments",
+      "Effect": "Allow",
+      "Action": ["kms:GenerateDataKey", "kms:Decrypt"],
+      "Resource": "REPLACE_KMS_KEY_ARN"
+    },
+    {
+      "Sid": "DocumentsBucketList",
+      "Effect": "Allow",
+      "Action": ["s3:ListBucket"],
+      "Resource": "arn:aws:s3:::REPLACE_BUCKET"
+    },
+    {
+      "Sid": "DocumentsBucketObjects",
+      "Effect": "Allow",
+      "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"],
+      "Resource": "arn:aws:s3:::REPLACE_BUCKET/*"
+    }
+  ]
+}

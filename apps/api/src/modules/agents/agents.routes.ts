@@ -4,7 +4,6 @@ import { z } from "zod";
 import { withTenant } from "@we360/db";
 import {
   agentTemplates as agentTemplateRows,
-  aiModels,
   agentVersionKnowledge,
   agentVersions,
   agentVersionTools,
@@ -17,7 +16,7 @@ import {
 import { AppError } from "../../lib/errors";
 import { audit, openSse, parse, tenantOf, uuidParam } from "../../lib/http";
 import { requireRole, requireSession, requireTenant } from "../../middleware/auth";
-import { getDefaultModelForTiers, listChatModels } from "../models/catalog";
+import { allCatalogModels, getDefaultModelForTiers, listChatModels } from "../models/catalog";
 import { usableProviders } from "../models/gateway";
 import { getOrgLimits } from "../plans/plan-limits";
 import { prepareRun, streamRun } from "../runs/run.service";
@@ -63,49 +62,39 @@ agentsRouter.get("/templates", async (req, res) => {
 agentsRouter.get("/", async (req, res) => {
   const { orgId } = tenantOf(req);
   const since = new Date(Date.now() - 30 * 86_400_000);
-  const rows = await withTenant(orgId, async (tx) => {
-    const list = await tx
-      .select({
-        id: agents.id,
-        name: agents.name,
-        description: agents.description,
-        avatarUrl: agents.avatarUrl,
-        status: agents.status,
-        disabledByAdmin: sql<boolean>`${agents.disabledByAdminAt} is not null`,
-        modelId: sql<string>`${agents.draftConfig}->'model'->>'modelId'`,
-        publishedVersionNo: agentVersions.versionNo,
-        updatedAt: agents.updatedAt,
-      })
-      .from(agents)
-      .leftJoin(agentVersions, eq(agentVersions.id, agents.publishedVersionId))
-      .where(isNull(agents.deletedAt))
-      .orderBy(desc(agents.updatedAt));
-    const stats = await tx
-      .select({
-        agentId: executions.agentId,
-        runs: count(),
-        succeeded: sql<number>`count(*) filter (where ${executions.status} = 'succeeded')::int`,
-      })
-      .from(executions)
-      .where(and(gte(executions.startedAt, since), sql`${executions.source} <> 'playground'`))
-      .groupBy(executions.agentId);
-    const deploymentCounts = await tx
-      .select({ agentId: deployments.agentId, n: count() })
-      .from(deployments)
-      .where(isNull(deployments.deletedAt))
-      .groupBy(deployments.agentId);
-    return list.map((a) => {
-      const s = stats.find((x) => x.agentId === a.id);
-      return {
-        ...a,
-        runs30d: s?.runs ?? 0,
-        successRate30d: s && s.runs ? s.succeeded / s.runs : null,
-        deployments: deploymentCounts.find((d) => d.agentId === a.id)?.n ?? 0,
-      };
-    });
+  // One statement (the database may be in another region); RLS applies to the subqueries too.
+  const [rows, models] = await Promise.all([
+    withTenant(orgId, (tx) =>
+      tx
+        .select({
+          id: agents.id,
+          name: agents.name,
+          description: agents.description,
+          avatarUrl: agents.avatarUrl,
+          status: agents.status,
+          disabledByAdmin: sql<boolean>`${agents.disabledByAdminAt} is not null`,
+          modelId: sql<string>`${agents.draftConfig}->'model'->>'modelId'`,
+          publishedVersionNo: agentVersions.versionNo,
+          updatedAt: agents.updatedAt,
+          runs: sql<number>`(select count(*) from ${executions} e where e.agent_id = ${agents.id} and e.started_at >= ${since} and e.source <> 'playground')::int`,
+          succeeded: sql<number>`(select count(*) from ${executions} e where e.agent_id = ${agents.id} and e.started_at >= ${since} and e.source <> 'playground' and e.status = 'succeeded')::int`,
+          deployments: sql<number>`(select count(*) from ${deployments} d where d.agent_id = ${agents.id} and d.deleted_at is null)::int`,
+        })
+        .from(agents)
+        .leftJoin(agentVersions, eq(agentVersions.id, agents.publishedVersionId))
+        .where(isNull(agents.deletedAt))
+        .orderBy(desc(agents.updatedAt)),
+    ),
+    allCatalogModels(),
+  ]);
+  res.json({
+    data: rows.map(({ runs, succeeded, ...a }) => ({
+      ...a,
+      runs30d: runs,
+      successRate30d: runs ? succeeded / runs : null,
+      modelName: models.find((m) => m.id === a.modelId)?.displayName ?? null,
+    })),
   });
-  const models = await withTenant(orgId, (tx) => tx.select({ id: aiModels.id, name: aiModels.displayName }).from(aiModels));
-  res.json({ data: rows.map((r) => ({ ...r, modelName: models.find((m) => m.id === r.modelId)?.name ?? null })) });
 });
 
 const createSchema = z.object({
@@ -170,19 +159,24 @@ agentsRouter.post("/", async (req, res) => {
 
 agentsRouter.get("/:id", async (req, res) => {
   const { orgId } = tenantOf(req);
-  const agent = await loadAgent(orgId, uuidParam(req, "id"));
-  const [published] = agent.publishedVersionId
-    ? await withTenant(orgId, (tx) =>
-        tx
-          .select({ id: agentVersions.id, versionNo: agentVersions.versionNo, configHash: agentVersions.configHash, publishedAt: agentVersions.publishedAt })
-          .from(agentVersions)
-          .where(eq(agentVersions.id, agent.publishedVersionId!)),
-      )
-    : [];
+  const id = uuidParam(req, "id");
+  // The agent and its published version in one query.
+  const [row] = await withTenant(orgId, (tx) =>
+    tx
+      .select({
+        agent: agents,
+        published: { id: agentVersions.id, versionNo: agentVersions.versionNo, configHash: agentVersions.configHash, publishedAt: agentVersions.publishedAt },
+      })
+      .from(agents)
+      .leftJoin(agentVersions, eq(agentVersions.id, agents.publishedVersionId))
+      .where(and(eq(agents.id, id), isNull(agents.deletedAt))),
+  );
+  if (!row) throw AppError.notFound("Agent");
+  const published = row.published?.id ? row.published : null;
   res.json({
-    ...agent,
-    publishedVersion: published ?? null,
-    hasUnpublishedChanges: !published || published.configHash !== hashConfig(agent.draftConfig),
+    ...row.agent,
+    publishedVersion: published,
+    hasUnpublishedChanges: !published || published.configHash !== hashConfig(row.agent.draftConfig),
   });
 });
 

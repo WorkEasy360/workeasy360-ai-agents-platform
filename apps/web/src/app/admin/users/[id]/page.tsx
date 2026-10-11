@@ -11,6 +11,7 @@ import type { PlatformRole, UserDetail } from "@/components/admin/types";
 import { api } from "@/lib/api";
 import { formatDate, formatDateTime, timeAgo } from "@/lib/format";
 import { useMe } from "@/lib/use-me";
+import { CopyBox } from "@/components/app/misc";
 
 export default function AdminUserDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -39,6 +40,8 @@ export default function AdminUserDetailPage() {
     },
   });
   const unban = useMutation({ mutationFn: () => post("unban"), onSuccess: invalidate });
+  // For when email is off or didn't arrive: a one-time link (1 hour) to pass on to the user.
+  const resetLink = useMutation({ mutationFn: () => post("password-reset-link") as Promise<{ url: string; expiresAt: string }> });
   const revoke = useMutation({
     mutationFn: () => post("revoke-sessions"),
     onSuccess: async () => {
@@ -83,6 +86,9 @@ export default function AdminUserDetailPage() {
           isSuper &&
           !isSelf && (
             <>
+              <Button variant="secondary" disabled={resetLink.isPending} onClick={() => resetLink.mutate()}>
+                {resetLink.isPending ? "Creating…" : "Password reset link"}
+              </Button>
               <Button variant="secondary" onClick={() => setRevokeOpen(true)}>
                 Revoke sessions
               </Button>
@@ -103,6 +109,15 @@ export default function AdminUserDetailPage() {
         }
       />
       <FormError message={errorText(unban.error)} />
+      <FormError message={errorText(resetLink.error)} />
+      {resetLink.data && (
+        <Notice>
+          <p className="mb-2">
+            Send this link to {u.email} through a channel you trust. It works once, until {formatDateTime(resetLink.data.expiresAt)}.
+          </p>
+          <CopyBox value={resetLink.data.url} />
+        </Notice>
+      )}
 
       {u.bannedAt && (
         <Notice tone="warning">

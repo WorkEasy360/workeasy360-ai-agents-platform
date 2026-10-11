@@ -11,7 +11,9 @@ import { parseArgs } from "node:util";
 import { eq } from "drizzle-orm";
 import { adminDb, closeDb } from "@we360/db";
 import { auditLogs, user } from "@we360/db/schema";
+import { closeQueues } from "../lib/queue";
 import { auth } from "../auth/auth";
+import { permitSignupForAdminCli } from "../auth/hooks";
 
 const { values } = parseArgs({
   options: {
@@ -35,6 +37,8 @@ if (!existing) {
   if (!password || password.length < 12) {
     throw new Error("New staff accounts need a password of 12+ characters in ADMIN_PASSWORD (or --password)");
   }
+  // Staff accounts are created here even when public sign-up is closed.
+  permitSignupForAdminCli();
   await auth.api.signUpEmail({ body: { email, password, name: values.name! } });
   [existing] = await db.select({ id: user.id }).from(user).where(eq(user.email, email));
   console.log(`Created user ${email}`);
@@ -51,3 +55,4 @@ await db.insert(auditLogs).values({
 });
 console.log(`${email} is now ${role}. Enable 2FA on first login (required in production).`);
 await closeDb();
+await closeQueues(); // the sign-up queued a verification email; release Redis so the process exits

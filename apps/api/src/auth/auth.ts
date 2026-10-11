@@ -5,10 +5,10 @@ import { organization, twoFactor } from "better-auth/plugins";
 import { appDb } from "@we360/db";
 import * as schema from "@we360/db/schema";
 import { env } from "../config/env";
-import { sendMail } from "../lib/mailer";
+import { notify } from "../modules/notifications/notify";
 import { getOrgLimits, limitOrInfinity } from "../modules/plans/plan-limits";
 import { enqueueOrgCleanup } from "../lib/queue";
-import { assertSeatAvailable, deleteAccount, onOrganizationCreated, organizationLimitReached, signInFailures } from "./hooks";
+import { assertSeatAvailable, assertSignupAllowed, deleteAccount, onOrganizationCreated, organizationLimitReached, signInFailures } from "./hooks";
 import { hashPassword, needsRehash, verifyPassword } from "./password";
 
 const google =
@@ -30,7 +30,9 @@ export const auth = betterAuth({
   },
   emailAndPassword: {
     enabled: true,
-    requireEmailVerification: env.isProduction,
+    // Without email (SES_REGION unset) nobody could verify, so accounts are treated as verified instead
+    // and public sign-up stays closed (see assertSignupAllowed).
+    requireEmailVerification: env.isProduction && env.emailEnabled,
     minPasswordLength: 10,
     // Argon2id; older scrypt hashes still verify and are upgraded at sign-in (see hooks.after).
     password: { hash: hashPassword, verify: verifyPassword },
@@ -38,24 +40,22 @@ export const auth = betterAuth({
     resetPasswordTokenExpiresIn: 60 * 60,
     revokeSessionsOnPasswordReset: true,
     sendResetPassword: async ({ user, url }) => {
-      await sendMail({
-        to: user.email,
-        subject: "Reset your password",
-        text: `Reset your WorkEasy360 Agents password:\n\n${url}\n\nThis link works once and expires in 1 hour. If you didn't ask for this, you can ignore this email; your password won't change.`,
-      });
+      await notify.resetPassword(user.email, url);
+    },
+    onPasswordReset: async ({ user }) => {
+      await notify.passwordChanged(user.email);
     },
   },
   emailVerification: {
-    sendOnSignUp: true,
+    sendOnSignUp: env.emailEnabled,
     autoSignInAfterVerification: true,
     sendVerificationEmail: async ({ user, url }) => {
-      await sendMail({
-        to: user.email,
-        subject: "Verify your email",
-        text: `Welcome to WorkEasy360 Agents. Verify your email: ${url}`,
-      });
+      await notify.verifyEmail(user.email, url);
     },
   },
+  // Single-use tokens (password reset, email change) are stored as SHA-256 hashes, so a database
+  // read doesn't reveal working links. Better Auth deletes each token when it is used.
+  verification: { storeIdentifier: "hashed" },
   socialProviders: google,
   // Google sign-in tokens are stored encrypted (with BETTER_AUTH_SECRET), not in plain text.
   account: { encryptOAuthTokens: true },
@@ -66,6 +66,9 @@ export const auth = betterAuth({
       enabled: true,
       beforeDelete: async (u) => {
         await deleteAccount(u.id, { deleteUserRow: false, actor: { type: "user", id: u.id } });
+      },
+      afterDelete: async (u) => {
+        await notify.accountDeleted(u.email);
       },
     },
     additionalFields: {
@@ -85,6 +88,9 @@ export const auth = betterAuth({
       }
     }),
     after: createAuthMiddleware(async (ctx) => {
+      if (ctx.path === "/change-password" && !(ctx.context.returned instanceof APIError) && ctx.context.session) {
+        await notify.passwordChanged(ctx.context.session.user.email);
+      }
       if (ctx.path === "/sign-in/email") {
         const email = (ctx.body as { email?: unknown } | undefined)?.email;
         if (typeof email === "string") {
@@ -103,6 +109,25 @@ export const auth = betterAuth({
     }),
   },
   databaseHooks: {
+    user: {
+      create: {
+        before: async (newUser) => {
+          await assertSignupAllowed(newUser.email);
+          // Without email, verification links can't be delivered: treat new accounts as verified.
+          if (!env.emailEnabled) return { data: { ...newUser, emailVerified: true } };
+        },
+      },
+      update: {
+        before: async (data, ctx) => {
+          // Security notice when two-factor authentication is switched on or off for the signed-in user.
+          const current = ctx?.context.session?.user as { email: string; twoFactorEnabled?: boolean | null } | undefined;
+          const next = (data as { twoFactorEnabled?: unknown }).twoFactorEnabled;
+          if (current && typeof next === "boolean" && Boolean(current.twoFactorEnabled) !== next) {
+            await notify.twoFactorChanged(current.email, next);
+          }
+        },
+      },
+    },
     session: {
       create: {
         before: async (session) => {
@@ -124,12 +149,9 @@ export const auth = betterAuth({
       organizationLimit: (user) => organizationLimitReached(user.id),
       // Enforced by Better Auth when members join, so invitations can't bypass plan limits.
       membershipLimit: async (_user, org) => limitOrInfinity((await getOrgLimits(org.id)).members),
-      sendInvitationEmail: async ({ email, organization: org, inviter, id }) => {
-        await sendMail({
-          to: email,
-          subject: `You're invited to ${org.name} on WorkEasy360 Agents`,
-          text: `${inviter.user.name} invited you to join ${org.name}.\n\nAccept: ${env.APP_URL}/accept-invitation/${id}`,
-        });
+      // Without email, admins copy the link from Settings → Members instead.
+      sendInvitationEmail: async ({ email, organization: org, inviter, id, role, invitation }) => {
+        await notify.invitation(email, { inviterName: inviter.user.name, orgName: org.name, role, invitationId: id, expiresAt: new Date(invitation.expiresAt) });
       },
       schema: {
         organization: {

@@ -2,16 +2,20 @@
 
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
-import { Button, Card, FormError, Input, Label, Select, Table } from "@/components/ui";
+import { Button, Card, FormError, Input, Label, Notice, Select, Table } from "@/components/ui";
+import { CopyBox } from "@/components/app/misc";
 import { getActiveOrgId } from "@/lib/api";
 import { authClient } from "@/lib/auth-client";
 import { useMe } from "@/lib/use-me";
+import { usePlatform } from "@/lib/use-platform";
 
 export default function MembersPage() {
   const { data: me } = useMe();
   const orgId = getActiveOrgId() ?? me?.organizations[0]?.id;
   const myRole = me?.organizations.find((o) => o.id === orgId)?.role;
   const canInvite = myRole === "owner" || myRole === "admin";
+  const { data: platform } = usePlatform();
+  const emailOff = platform?.emailEnabled === false;
 
   const queryClient = useQueryClient();
   const { data: org, isLoading } = useQuery({
@@ -74,9 +78,32 @@ export default function MembersPage() {
             </Button>
           </form>
           <p className="mt-2 text-xs text-[var(--muted)]">Admins can also manage credentials, AI keys and API keys.</p>
+          {emailOff && (
+            <div className="mt-3">
+              <Notice>Email isn&apos;t set up on this server, so invitations aren&apos;t emailed. Copy the invitation link below and send it to the person yourself.</Notice>
+            </div>
+          )}
           <div className="mt-3">
             <FormError message={error} />
-            {sent && <p className="text-sm text-green-700 dark:text-green-400">Invitation sent to {sent}.</p>}
+            {sent && !emailOff && <p className="text-sm text-green-700 dark:text-green-400">Invitation sent to {sent}.</p>}
+            {sent && emailOff && (
+              <p className="text-sm text-green-700 dark:text-green-400">Invitation created for {sent}. Copy its link below and send it yourself.</p>
+            )}
+          </div>
+        </Card>
+      )}
+
+      {canInvite && pendingInvites.length > 0 && (
+        <Card>
+          <h2 className="mb-1 font-medium">Invitation links</h2>
+          <p className="mb-3 text-xs text-[var(--muted)]">Each link works only for the invited email address, until the invitation expires.</p>
+          <div className="space-y-2">
+            {pendingInvites.map((i) => (
+              <div key={i.id}>
+                <p className="mb-1 text-xs text-[var(--muted)]">{i.email}</p>
+                <CopyBox value={`${window.location.origin}/accept-invitation/${i.id}`} />
+              </div>
+            ))}
           </div>
         </Card>
       )}

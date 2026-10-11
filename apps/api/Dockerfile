@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# API and worker image (same image; the ECS task picks the command).
+# API and worker image (same image; docker-compose picks the command for the worker and the one-off tasks).
 #   docker build -f apps/api/Dockerfile -t we360-agents-api .
 #   API:    docker run we360-agents-api
 #   Worker: docker run we360-agents-api node dist/worker.js
@@ -30,4 +30,7 @@ COPY --from=build /repo/apps/api/dist ./dist
 COPY --from=build /repo/packages/db/migrations ./migrations
 USER node
 EXPOSE 4000
+# Readiness of the API: /api/health answers 503 unless the database and Redis both respond.
+# (The worker uses the same image; deploy/docker-compose.prod.yml gives it its own check.)
+HEALTHCHECK --interval=30s --timeout=8s --start-period=40s --retries=3   CMD ["node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1),()=>process.exit(1))"]
 CMD ["node", "dist/server.js"]

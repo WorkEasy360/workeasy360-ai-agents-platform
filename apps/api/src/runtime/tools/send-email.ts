@@ -1,5 +1,6 @@
 import { z } from "zod";
-import { sendMail } from "../../lib/mailer";
+import { env } from "../../config/env";
+import { notify } from "../../modules/notifications/notify";
 import { redis } from "../../lib/queue";
 import type { RuntimeTool, ToolProviderDefinition } from "./types";
 
@@ -51,8 +52,13 @@ export function buildEmailTool(row: { name: string; description: string; config:
       }
       const subject = `${row.config.subjectPrefix ? `${row.config.subjectPrefix} ` : ""}${String(input.subject)}`.slice(0, 200);
       const body = `${String(input.body)}\n\n—\nSent by an AI agent on WorkEasy360 Agents (run ${ctx.executionId}).`;
-      for (const to of row.config.recipients) await sendMail({ to, subject, text: body });
-      return { forModel: { sent: true, recipients: row.config.recipients.length }, forTrace: { to: row.config.recipients, subject } };
+      if (!env.emailEnabled) {
+        return { forModel: { sent: false, error: "Email isn't set up on this platform. Tell the user the team will follow up." }, forTrace: { error: "email is off" } };
+      }
+      // Queued: delivery (with retries) happens in the worker, so a slow mail service doesn't stall the run.
+      const queued = await Promise.all(row.config.recipients.map((to) => notify.agentToolEmail(to, subject, body)));
+      const sent = queued.every(Boolean);
+      return { forModel: sent ? { sent: true, recipients: row.config.recipients.length } : { sent: false, error: "The email couldn't be queued. Tell the user the team will follow up." }, forTrace: { to: row.config.recipients, subject, queued: sent } };
     },
   };
 }

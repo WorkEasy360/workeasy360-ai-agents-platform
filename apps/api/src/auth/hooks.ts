@@ -3,8 +3,34 @@ import { and, count, eq, gt, inArray, sql } from "drizzle-orm";
 import { adminDb, appDb, withTenant } from "@we360/db";
 import { auditLogs, invitation, member, organization, user, workspaces } from "@we360/db/schema";
 import { createHash } from "node:crypto";
+import { env } from "../config/env";
 import { enqueueOrgCleanup, redis } from "../lib/queue";
 import { getOrgLimits } from "../modules/plans/plan-limits";
+
+let internalSignup = false;
+
+/** The admin CLI (scripts/create-admin.ts) may create platform staff accounts while sign-up is closed. */
+export function permitSignupForAdminCli(): void {
+  internalSignup = true;
+}
+
+/**
+ * With ALLOW_PUBLIC_SIGNUP=false (the production default), only people with a pending, unexpired
+ * invitation can create an account, with email/password or Google alike.
+ */
+export async function assertSignupAllowed(email: string): Promise<void> {
+  if (env.allowPublicSignup || internalSignup) return;
+  const [pending] = await appDb()
+    .select({ n: count() })
+    .from(invitation)
+    .where(and(sql`lower(${invitation.email}) = ${email.toLowerCase()}`, eq(invitation.status, "pending"), gt(invitation.expiresAt, new Date())));
+  if (!pending?.n) {
+    throw new APIError("FORBIDDEN", {
+      message: "Sign-up is by invitation only. Ask your organization's admin to invite this email address.",
+      code: "signup_closed",
+    });
+  }
+}
 
 /** Members plus pending invitations must stay within the plan's member limit. */
 export async function assertSeatAvailable(orgId: string): Promise<void> {

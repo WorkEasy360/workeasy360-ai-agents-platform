@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Router, type Request } from "express";
 import { and, asc, desc, eq, ilike, lt, or, sql, type SQL } from "drizzle-orm";
 import { z } from "zod";
@@ -19,7 +20,12 @@ import {
 import { AppError } from "../../lib/errors";
 import { parse, uuidParam } from "../../lib/http";
 import { getIngestQueue } from "../../lib/queue";
+import { auth } from "../../auth/auth";
 import { deleteAccount } from "../../auth/hooks";
+import { env } from "../../config/env";
+import { clearModelCache } from "../models/catalog";
+import { notify } from "../notifications/notify";
+import { clearOrgLimits } from "../plans/plan-limits";
 import { requireSession } from "../../middleware/auth";
 import { requirePlatformRole } from "../../middleware/platform-admin";
 
@@ -173,11 +179,13 @@ adminRouter.patch("/organizations/:id", superOnly, async (req, res) => {
     .set({ planKey: body.planKey, status: body.status, planOverrides: body.planOverrides === undefined ? undefined : body.planOverrides })
     .where(eq(organization.id, id))
     .returning();
+  clearOrgLimits(id);
   await adminAudit(req, "organization.updated", { type: "organization", id, orgId: id }, {
     reason: body.reason,
     before: { planKey: before.planKey, status: before.status, planOverrides: before.planOverrides },
     after: { planKey: after!.planKey, status: after!.status, planOverrides: after!.planOverrides },
   });
+  if (body.status && body.status !== before.status) await notify.organizationStatus(id, after!.name, body.status);
   res.json(after);
 });
 
@@ -240,6 +248,22 @@ adminRouter.post("/users/:id/unban", superOnly, async (req, res) => {
   await db().update(user).set({ bannedAt: null, banReason: null }).where(eq(user.id, id));
   await adminAudit(req, "user.unbanned", { type: "user", id });
   res.json({ ok: true });
+});
+
+/**
+ * One-time password reset link (valid 1 hour) for a super admin to pass on, for when email is off or
+ * hasn't arrived. Same token type and lifetime as the emailed link; the action is audited.
+ */
+adminRouter.post("/users/:id/password-reset-link", superOnly, async (req, res) => {
+  const id = uuidParam(req, "id");
+  const [u] = await db().select({ id: user.id }).from(user).where(eq(user.id, id));
+  if (!u) throw AppError.notFound("User");
+  const token = randomBytes(18).toString("base64url");
+  const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+  const ctx = await auth.$context;
+  await ctx.internalAdapter.createVerificationValue({ value: id, identifier: `reset-password:${token}`, expiresAt });
+  await adminAudit(req, "user.password_reset_link_created", { type: "user", id });
+  res.json({ url: `${env.APP_URL}/reset-password?token=${token}`, expiresAt: expiresAt.toISOString() });
 });
 
 adminRouter.post("/users/:id/revoke-sessions", superOnly, async (req, res) => {
@@ -429,6 +453,7 @@ adminRouter.patch("/plans/:key", superOnly, async (req, res) => {
   const [before] = await db().select().from(plans).where(eq(plans.key, key));
   if (!before) throw AppError.notFound("Plan");
   const [after] = await db().update(plans).set(body).where(eq(plans.key, key)).returning();
+  clearOrgLimits();
   await adminAudit(req, "plan.updated", { type: "plan", id: key }, { before, after });
   res.json(after);
 });
@@ -460,6 +485,7 @@ adminRouter.post("/models", superOnly, async (req, res) => {
     .insert(aiModels)
     .values({ ...body, inputPricePerMtokUsd: String(body.inputPricePerMtokUsd), outputPricePerMtokUsd: String(body.outputPricePerMtokUsd) })
     .returning();
+  clearModelCache();
   await adminAudit(req, "model.created", { type: "model", id: row!.id }, body);
   res.status(201).json(row);
 });
@@ -480,6 +506,7 @@ adminRouter.patch("/models/:id", superOnly, async (req, res) => {
       .returning();
     return r;
   });
+  clearModelCache();
   if (!row) throw AppError.notFound("Model");
   await adminAudit(req, "model.updated", { type: "model", id }, body);
   res.json(row);

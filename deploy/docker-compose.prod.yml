@@ -1,0 +1,164 @@
+# WorkEasy360 AI Agents: production stack for a single EC2 host.
+#
+#   cd ~/agents/deploy
+#   cp .env.example .env && chmod 600 .env && nano .env    # see README.md
+#   bash scripts/deploy.sh                                  # pull, migrate, up
+#
+# Only nginx publishes ports (80/443). Postgres is the SHARED Aurora cluster: schema `agents`, roles
+# agents_app (API) and agents_owner (worker, migrations). Email is SES through the EC2 instance role.
+# Redis (queues, rate limits) runs here, on the instance.
+#
+# Compose reads deploy/.env for ${...} substitution in this file, and api/worker/migrate load the same
+# file as their environment (raw format: values are taken literally, so passwords may contain $ or #).
+
+name: agents-prod
+
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "5"
+
+# required: false only so `config` can be validated without a .env; deploy.sh refuses to run without it.
+x-app-env-file: &app-env-file
+  - path: .env
+    required: false
+    format: raw
+
+x-backend: &backend
+  image: ${IMAGE_PREFIX:-agents}-api:${IMAGE_TAG:-latest}
+  restart: unless-stopped
+  env_file: *app-env-file
+  environment: &backend-env
+    NODE_ENV: production
+    API_PORT: "4000"
+    APP_URL: https://${DOMAIN:?set DOMAIN in deploy/.env}
+    REDIS_URL: redis://redis:6379
+    # nginx is exactly one hop in front of the API and overwrites X-Forwarded-For with the client address.
+    TRUST_PROXY_HOPS: "1"
+    TZ: ${APP_TIMEZONE:-Asia/Kolkata}
+  depends_on:
+    redis:
+      condition: service_healthy
+  stop_grace_period: 30s
+  logging: *logging
+
+services:
+  # One-off release step, never started by `up`:
+  #   docker compose -f docker-compose.prod.yml --profile migrate run --rm migrate
+  # Applies migrations inside schema `agents` (as agents_owner), then inserts any missing catalog rows
+  # (plans, models, feature flags; insert-only, never demo data). NEVER point drizzle-kit push or any
+  # reset/drop at the shared Aurora database.
+  migrate:
+    <<: *backend
+    profiles: ["migrate"]
+    restart: "no"
+    depends_on: []
+    command: ["sh", "-c", "node dist/scripts/migrate.js && node dist/scripts/seed.js"]
+
+  api:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      # Connection pools must fit the roles' limits (agents_app 12, agents_owner 8) across api + worker
+      # + the one-off migrate step: api 6 + worker 4 app connections, api 2 + worker 3 + migrate 1 owner.
+      DB_POOL_MAX: "6"
+      DB_ADMIN_POOL_MAX: "2"
+    expose: ["4000"]
+    # Readiness: /api/health returns 503 unless the database and Redis both answer.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:4000/api/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 8s
+      start_period: 40s
+      retries: 3
+
+  worker:
+    <<: *backend
+    environment:
+      <<: *backend-env
+      DB_POOL_MAX: "4"
+      DB_ADMIN_POOL_MAX: "3"
+    command: ["node", "dist/worker.js"]
+    # The worker has no HTTP port: it touches /tmp/worker-heartbeat every 15 s while Redis answers.
+    healthcheck:
+      test: ["CMD", "node", "-e", "const fs=require('fs');try{process.exit(Date.now()-fs.statSync('/tmp/worker-heartbeat').mtimeMs<90000?0:1)}catch{process.exit(1)}"]
+      interval: 30s
+      timeout: 5s
+      start_period: 40s
+      retries: 3
+
+  web:
+    image: ${IMAGE_PREFIX:-agents}-web:${IMAGE_TAG:-latest}
+    restart: unless-stopped
+    # Deliberately no env_file: the web server needs none of the backend secrets. NEXT_PUBLIC_* values and
+    # the /api rewrite target are baked into the image at build time.
+    environment:
+      NODE_ENV: production
+      API_INTERNAL_URL: http://api:4000
+    expose: ["3000"]
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/login').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+    logging: *logging
+
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    # BullMQ needs noeviction. AOF keeps queued jobs (emails, ingestion) across restarts.
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+    logging: *logging
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports: ["80:80", "443:443"]
+    environment:
+      DOMAIN: ${DOMAIN}
+    volumes:
+      # The official image renders /etc/nginx/templates/*.template into conf.d with envsubst
+      # (only ${DOMAIN}; nginx's own $variables are left alone).
+      - ./nginx/templates:/etc/nginx/templates:ro
+      - certbot-conf:/etc/letsencrypt:ro
+      - certbot-www:/var/www/certbot:ro
+    depends_on: [api, web]
+    # Reload every 6h so renewed certificates are picked up without a restart.
+    command:
+      - /bin/sh
+      - -c
+      - 'while :; do sleep 6h & wait $${!}; nginx -s reload; done & exec /docker-entrypoint.sh nginx -g "daemon off;"'
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://127.0.0.1/nginx-health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    logging: *logging
+
+  # Renews certificates twice a day (a no-op until one is within 30 days of expiry).
+  # First issuance is scripts/init-letsencrypt.sh.
+  certbot:
+    image: certbot/certbot:v4.2.0
+    restart: unless-stopped
+    volumes:
+      - certbot-conf:/etc/letsencrypt
+      - certbot-www:/var/www/certbot
+    entrypoint:
+      - /bin/sh
+      - -c
+      - "trap exit TERM; while :; do certbot renew --webroot -w /var/www/certbot --quiet; sleep 12h & wait $${!}; done"
+    logging: *logging
+
+volumes:
+  certbot-conf:
+  certbot-www:
+  redis-data:

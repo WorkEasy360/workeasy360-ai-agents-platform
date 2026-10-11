@@ -9,7 +9,7 @@
     "./seed-data": "./src/seed-data.ts"
   },
   "scripts": {
-    "generate": "drizzle-kit generate",
+    "generate": "drizzle-kit generate && node scripts/strip-public-schema.mjs",
     "migrate": "tsx src/migrate.ts",
     "seed": "tsx src/seed.ts",
     "typecheck": "tsc --noEmit"

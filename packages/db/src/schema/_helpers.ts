@@ -29,7 +29,8 @@ export const deletedAt = () => tz("deleted_at");
 /**
  * Row-level security for tenant tables. The API sets `app.org_id` per transaction (see `withTenant`);
  * when it is unset, the expression is NULL and no rows are visible or writable.
- * The `we360_admin` role bypasses RLS and is used only by the worker and super admin API.
+ * The schema owner (`agents_owner`) is not subject to RLS and is used only by the worker, migrations and
+ * the super admin API; the API's tenant requests use `agents_app`, which RLS restricts.
  */
 export const tenantPolicy = () =>
   pgPolicy("tenant_isolation", {

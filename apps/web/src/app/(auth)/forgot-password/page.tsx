@@ -4,11 +4,13 @@ import Link from "next/link";
 import { useState } from "react";
 import { Button, Card, FormError, Input, Label, Notice } from "@/components/ui";
 import { authClient } from "@/lib/auth-client";
+import { usePlatform } from "@/lib/use-platform";
 
 export default function ForgotPasswordPage() {
   const [sentTo, setSentTo] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
+  const { data: platform } = usePlatform();
 
   async function onSubmit(e: React.FormEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -29,7 +31,11 @@ export default function ForgotPasswordPage() {
   return (
     <Card>
       <h1 className="mb-1 text-xl font-semibold">Reset your password</h1>
-      {sentTo ? (
+      {platform && !platform.emailEnabled ? (
+        <div className="mt-4">
+          <Notice>Email isn&apos;t set up on this server yet, so reset links can&apos;t be sent. Ask a platform administrator to create a reset link for you.</Notice>
+        </div>
+      ) : sentTo ? (
         <div className="mt-4 space-y-4">
           <Notice tone="success">
             If an account exists for <strong>{sentTo}</strong>, we&apos;ve sent a link to reset the password. It works once and expires in 1 hour.
