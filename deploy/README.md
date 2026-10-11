@@ -1,6 +1,6 @@
 # Production runbook: WorkEasy360 AI Agents
 
-One EC2 instance (Mumbai, `ap-south-1`) runs everything except the database, with Docker Compose:
+One EC2 instance (Stockholm, `eu-north-1`, the same region and VPC as the database) runs everything except the database, with Docker Compose:
 
 | Container | What it does |
 |---|---|
@@ -54,14 +54,14 @@ Other pieces:
   ssh -i <key>.pem ubuntu@<ip> 'sudo bash ~/agents/deploy/scripts/bootstrap-ec2.sh'
   ```
 
-### 2. KMS key, S3 bucket, IAM role (console, region **Asia Pacific (Mumbai)**)
+### 2. KMS key, S3 bucket, IAM role (console, region **Europe (Stockholm)**)
 1. **KMS key:** KMS → Customer managed keys → **Create key**.
    - Choose Symmetric, then Encrypt and decrypt.
    - Alias: `agents-prod`.
    - Key administrators: you. Key users: leave empty for now.
    - Finish, then copy the **key ARN**.
 2. **S3 bucket:** S3 → **Create bucket**.
-   - Name, for example `workeasy360-agents-documents`; Region: Mumbai.
+   - Name, for example `workeasy360-agents-documents`; Region: Stockholm (eu-north-1).
    - **Block all public access**: on. Versioning: optional.
    - Default encryption: SSE-KMS with the `agents-prod` key. The app also requests it on every upload.
 3. **IAM role:** IAM → Roles → **Create role**.
@@ -69,7 +69,7 @@ Other pieces:
    - Skip the managed policies. Name it `agents-ec2`, then Create role.
    - Open the role → Add permissions → **Create inline policy** → JSON.
    - Paste [iam/instance-policy.json](iam/instance-policy.json) and replace:
-     - `REPLACE_MAIL_FROM_ADDRESS`: the bare sender address, e.g. `noreply@workeasy360.com`
+     - `REPLACE_MAIL_FROM_ADDRESS`: the bare sender address, e.g. `no-reply@workeasy360.com`
      - `REPLACE_KMS_KEY_ARN`
      - `REPLACE_BUCKET` (two places)
    - Policy name `agents-app`, then Create.
@@ -79,19 +79,19 @@ Other pieces:
    - Instance metadata service: Enabled. IMDSv2: **Required**. **Metadata response hop limit: 2**. Save.
    - Or with the CLI:
      ```bash
-     aws ec2 modify-instance-metadata-options --region ap-south-1 --instance-id <i-...> \
+     aws ec2 modify-instance-metadata-options --region eu-north-1 --instance-id <i-...> \
        --http-endpoint enabled --http-tokens required --http-put-response-hop-limit 2
      ```
 
 ### 3. Amazon SES (email)
 - **Region:** SES identities are per region. Use the region where `workeasy360.com` is already verified, if it is: SES → Identities shows "Verified". That region becomes `SES_REGION`.
-- **Otherwise, verify in `ap-south-1`:**
+- **Otherwise, verify in `eu-north-1`:**
   - **Domain (recommended):**
     1. SES → Identities → Create identity → Domain → `workeasy360.com`.
     2. Choose Easy DKIM, RSA 2048.
     3. Add the **3 CNAME records** SES shows at your DNS provider.
     4. Wait for "Verified", usually minutes to a few hours.
-  - **Single sender:** Create identity → Email address → `noreply@workeasy360.com`, then click the link SES emails to that mailbox. The mailbox must exist.
+  - **Single sender:** Create identity → Email address → `no-reply@workeasy360.com`, then click the link SES emails to that mailbox. The mailbox must exist.
 - **Sandbox:** a new SES account is in the **sandbox**: it can only send to verified addresses, 200 per day. To email real users: SES → Account dashboard → **Request production access** (transactional email; describe sign-up, invitation and password-reset emails). Approval usually takes about a day.
 - **Until SES is ready, leave `SES_REGION` unset.** The app still works:
   - accounts need no verification, and sign-up stays invitation-only
@@ -139,7 +139,7 @@ Settings → Secrets and variables → Actions:
 | Secret | `EC2_HOST` | the Elastic IP |
 | Secret | `EC2_USER` | `ubuntu` |
 | Secret | `EC2_SSH_KEY` | the **deploy key's private key** (its public key is in the server's `~/.ssh/authorized_keys`) |
-| Variable | `DOMAIN` | e.g. `13-201-45-67.sslip.io` |
+| Variable | `DOMAIN` | e.g. `16-171-214-145.sslip.io` |
 
 Images go to GHCR (`ghcr.io/workeasy360/agents-api` and `agents-web`). The workflow's own token pulls them on the server, then logs out again.
 
@@ -169,8 +169,4 @@ Sign in, turn on two-factor authentication (required for platform admins), creat
 Notes:
 - **Rollbacks:** migrations are not reversed, so a migration must keep working with the previous release. Add columns; don't drop them in the same release.
 - **Downtime:** a deploy restarts the containers, so expect a few seconds of downtime.
-- **Latency:** the database is in Stockholm, about 150 ms from Mumbai per round trip. The code keeps round trips low:
-  - one round trip for the start of each tenant transaction
-  - cached plan limits, model catalog and workspace
-  - single-statement summaries
-  - Moving the EC2 to `eu-north-1` would cut every page and chat start to a fraction. No code change is needed, only a new instance, the same `.env`, and a new `DOMAIN`.
+- **Latency:** the server and the database are in the same region, about 1 ms per round trip. The code still keeps round trips low (one round trip to start each tenant transaction; cached plan limits, model catalog and workspace; single-statement summaries), so it would also cope with a database further away.

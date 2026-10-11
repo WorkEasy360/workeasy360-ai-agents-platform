@@ -1,5 +1,5 @@
 // Manual measurement (not part of the suite): database round trips per request, from the local Postgres
-// statement log. Production's database is ~150 ms away, so each one counts. Usage:
+// statement log. Each one is a network round trip in production. Usage:
 //   docker compose exec postgres psql -U postgres -c "alter system set log_statement='all'" -c "select pg_reload_conf()"
 //   cd apps/api && NODE_ENV=test MOCK_LLM=true QUEUE_PREFIX=test AUTH_RATE_LIMIT=1000 SHOW=1 npx tsx --env-file=../../.env test/roundtrips.manual.ts
 //   docker compose exec postgres psql -U postgres -c "alter system reset log_statement" -c "select pg_reload_conf()"

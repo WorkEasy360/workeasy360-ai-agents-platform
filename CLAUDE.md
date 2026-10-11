@@ -10,7 +10,7 @@ Non-negotiables:
   - Never connect the app as `postgres`.
   - Migrations must not name a schema (`deploy/scripts/check-migrations.sh`).
 - **Tenant data only inside `withTenant(orgId, tx => …)`** (RLS). `adminDb()` is for the worker, migrations and the platform-admin API only.
-- **The production DB is ~150 ms away:** no queries in loops, prefer single statements and one `withTenant` per request. Count round trips with `apps/api/test/roundtrips.manual.ts`.
+- **Keep database round trips low:** no queries in loops, prefer single statements and one `withTenant` per request. Count round trips with `apps/api/test/roundtrips.manual.ts`.
 - **Email goes only through `modules/notifications/notify.ts`.** Code must also work with email off (`SES_REGION` unset).
 - **Never print or commit secrets.** Production settings live only in `~/agents/deploy/.env` on the server. Don't touch the HRMS server (52.66.103.213).
 - **Local services are Docker Compose** (Postgres 18 on 5433, Redis, S3Mock; start Docker Desktop first). Docker images are built only on GitHub (OneDrive breaks local builds).

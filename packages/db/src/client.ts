@@ -20,7 +20,7 @@ function createDb(url: string, max: number, statementTimeoutMs: number): { db: D
   const pool = new pg.Pool({
     connectionString: url,
     max,
-    // The production database is in another region (~150 ms away): allow for the TLS handshake.
+    // Allows for the TLS handshake even if the database is in another region.
     connectionTimeoutMillis: 10_000,
     statement_timeout: statementTimeoutMs,
     idle_in_transaction_session_timeout: 60_000,

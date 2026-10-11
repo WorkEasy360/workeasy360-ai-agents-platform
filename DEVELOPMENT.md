@@ -11,7 +11,7 @@ Everything you need to change WorkEasy360 AI Agents and ship it. Production deta
 | **Deploy** | Push to `main`. CI runs; if it passes, GitHub Actions builds the images and rolls them out to the EC2 host. |
 | **Stack** | pnpm + Turborepo. API: Express 5 + TypeScript + Drizzle + Better Auth, BullMQ worker. Web: Next.js 16 + React 19 + Tailwind. |
 | **Production DB** | Shared Aurora PostgreSQL 18 (eu-north-1). This app owns schema `agents` only, as roles `agents_app` (API, RLS applies) and `agents_owner` (worker, migrations). |
-| **Server** | EC2 in ap-south-1 (Ubuntu), user `ubuntu`, deploy files in `~/agents/deploy` |
+| **Server** | EC2 `16.171.214.145` (eu-north-1, same region and VPC as the database; Ubuntu 26.04, t3.small), user `ubuntu`, deploy files in `~/agents/deploy` |
 
 ## Run it locally
 
@@ -78,7 +78,7 @@ Useful local switches in `.env`:
   - `pk_` keys authenticate only the public chat API
   - `test/security.test.ts` checks this.
 
-**The production database is far away (~150 ms per round trip)**
+**Keep database round trips low** (the server and database share a region, ~1 ms each, but every request pays for each one, and the code was tuned for a database ~150 ms away)
 - **Measure.** `apps/api/test/roundtrips.manual.ts` counts statements per request.
 - **One statement beats several.** Use subqueries and joins. See `getUsageSummary` and `GET /agents`.
 - **One `withTenant` per request where possible.** Each costs 2 round trips (begin+set, commit) on top of its statements.

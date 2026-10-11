@@ -5,7 +5,7 @@ let client: S3Client | undefined;
 
 function s3(): S3Client {
   client ??= new S3Client({
-    region: process.env.AWS_REGION ?? "ap-south-1",
+    region: process.env.AWS_REGION ?? "eu-north-1",
     endpoint: process.env.S3_ENDPOINT || undefined,
     forcePathStyle: process.env.S3_FORCE_PATH_STYLE === "true",
     // S3Mock accepts any credentials; real AWS uses the task role.

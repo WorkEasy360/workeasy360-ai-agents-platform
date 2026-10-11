@@ -76,7 +76,7 @@ server {
         # Chat answers stream as server-sent events: pass every chunk through as it arrives.
         proxy_buffering off;
         proxy_cache off;
-        # The database is ~150 ms away and agent runs call models and tools: allow long requests.
+        # Agent runs call models and tools, and document uploads are parsed: allow long requests.
         proxy_read_timeout 300s;
         proxy_send_timeout 300s;
         proxy_pass $api_upstream;

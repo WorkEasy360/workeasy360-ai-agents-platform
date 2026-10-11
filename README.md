@@ -88,7 +88,7 @@ One-off tasks with the API image: `node dist/scripts/migrate.js` (migrations), `
 
 ## Deploying
 
-Production is one EC2 instance in Mumbai plus the shared Aurora PostgreSQL cluster (schema `agents` only). Pushing to `main` deploys after CI passes: images are built on GitHub, pushed to GHCR and rolled out over SSH. Setup, operations and the rules for the shared database: [deploy/README.md](deploy/README.md).
+Production is one EC2 instance in eu-north-1 plus the shared Aurora PostgreSQL cluster (schema `agents` only). Pushing to `main` deploys after CI passes: images are built on GitHub, pushed to GHCR and rolled out over SSH. Setup, operations and the rules for the shared database: [deploy/README.md](deploy/README.md).
 
 The earlier ECS/Fargate Terraform in [infra/terraform](infra/terraform) is not used by this setup.
 
