@@ -1,0 +1,6 @@
+# Accepted findings for `trivy config` (CI security job). Each needs a reason.
+
+# AVD-AWS-0104 "security group allows unrestricted egress": the app must reach AI providers, customers'
+# own APIs (Custom API tool, with SSRF protection in the app) and AWS endpoints, whose addresses aren't
+# fixed. Applies to the (currently unused) ECS Terraform in infra/terraform.
+AVD-AWS-0104

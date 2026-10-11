@@ -89,4 +89,4 @@ jobs:
       - name: Secret scan (whole history)
         run: docker run --rm -v "$PWD:/repo" zricethezav/gitleaks:v8.28.0 git /repo --no-banner --redact
       - name: Infrastructure and Dockerfile misconfiguration scan
-        run: docker run --rm -v "$PWD:/repo:ro" aquasec/trivy:0.67.2 config --exit-code 1 --severity CRITICAL --skip-dirs node_modules /repo
+        run: docker run --rm -v "$PWD:/repo:ro" aquasec/trivy:0.67.2 config --exit-code 1 --severity CRITICAL --skip-dirs node_modules --ignorefile /repo/.trivyignore /repo

@@ -1,16 +1,40 @@
 {
   "$schema": "https://turbo.build/schema.json",
-  "globalEnv": ["NODE_ENV"],
+  "globalEnv": [
+    "NODE_ENV"
+  ],
   "tasks": {
     "build": {
-      "dependsOn": ["^build"],
-      "outputs": ["dist/**", ".next/**", "!.next/cache/**"]
+      "dependsOn": [
+        "^build"
+      ],
+      "outputs": [
+        "dist/**",
+        ".next/**",
+        "!.next/cache/**"
+      ]
     },
     "typecheck": {
-      "dependsOn": ["^typecheck"]
+      "dependsOn": [
+        "^typecheck"
+      ]
     },
     "test": {
-      "cache": false
+      "cache": false,
+      "passThroughEnv": [
+        "APP_URL",
+        "DATABASE_URL",
+        "DATABASE_URL_ADMIN",
+        "DB_SCHEMA",
+        "REDIS_URL",
+        "BETTER_AUTH_SECRET",
+        "LOCAL_MASTER_KEY",
+        "MOCK_LLM",
+        "S3_BUCKET",
+        "S3_ENDPOINT",
+        "S3_FORCE_PATH_STYLE",
+        "MAIL_TRANSPORT"
+      ]
     },
     "dev": {
       "cache": false,
