@@ -3,7 +3,7 @@
 #   docker build -f apps/api/Dockerfile -t we360-agents-api .
 #   API:    docker run we360-agents-api
 #   Worker: docker run we360-agents-api node dist/worker.js
-FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402 AS build
+FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4 AS build
 WORKDIR /repo
 RUN corepack enable
 COPY pnpm-lock.yaml pnpm-workspace.yaml package.json turbo.json tsconfig.base.json ./
@@ -15,7 +15,7 @@ COPY packages/db packages/db
 RUN pnpm --filter @we360/api build \
  && pnpm --filter @we360/api deploy --prod --legacy /out
 
-FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18c0e2bc2e402
+FROM node:25-alpine@sha256:bdf2cca6fe3dabd014ea60163eca3f0f7015fbd5c7ee1b0e9ccb4ced6eb02ef4
 WORKDIR /app
 ENV NODE_ENV=production
 # Trust the RDS CA so database connections can verify the server certificate (sslmode=verify-full).
