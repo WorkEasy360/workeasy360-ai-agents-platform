@@ -16,7 +16,7 @@
     "demo:seed": "tsx --env-file=../../.env src/scripts/seed-demo.ts"
   },
   "dependencies": {
-    "@ai-sdk/anthropic": "^4.0.71",
+    "@ai-sdk/anthropic": "^4.0.78",
     "@ai-sdk/google": "^4.0.87",
     "@ai-sdk/openai": "^4.0.83",
     "@ai-sdk/provider": "^4.0.21",
