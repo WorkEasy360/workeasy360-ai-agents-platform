@@ -20,7 +20,7 @@
     "@ai-sdk/google": "^4.0.87",
     "@ai-sdk/openai": "^4.0.83",
     "@ai-sdk/provider": "^4.0.21",
-    "@aws-sdk/client-kms": "^3.1145.0",
+    "@aws-sdk/client-kms": "^3.1149.0",
     "@aws-sdk/client-s3": "^3.1145.0",
     "@aws-sdk/client-sesv2": "^3.1145.0",
     "@node-rs/argon2": "^2.2.2",
