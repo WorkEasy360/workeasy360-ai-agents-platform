@@ -1,0 +1,9 @@
+{
+  "GHSA-fc5q-39xc-vjpf": {
+    "package": "picomatch <= 4.0.7 (high: ReDoS through single-branch repeated extglobs)",
+    "owner": "platform owner",
+    "accepted": "2026-11-18 (the acceptance already given for AI-CRM)",
+    "reviewBy": "2026-12-18",
+    "why": "No fixed release exists: 4.0.7 is the latest and the advisory names no patched version. Reached only through vitest 5.0.3, the API's test runner (vitest, vite, tinyglobby and fdir use picomatch). It is listed under `pnpm audit --prod` only because vitest is an optional peer dependency of better-auth (for its `better-auth/test` helpers) and pnpm links that peer since apps/api has vitest as a devDependency. So the API image's `pnpm deploy --prod` does copy it into node_modules, but nothing loads it: the app never imports `better-auth/test` (the only better-auth file that imports vitest), the built dist/ imports no vitest, vite or picomatch, and the built server and worker load none of them at start-up (checked 2026-11-18 with a module-resolution hook). The web image (Next.js standalone output) does not contain the package; Next's own bundled copy runs at request time only for images.localPatterns/remotePatterns, which next.config.ts does not set. Every glob pattern on these paths is developer-written test configuration. Remove the ID and this record once picomatch publishes a fix."
+  }
+}
