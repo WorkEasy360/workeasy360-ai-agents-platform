@@ -72,6 +72,7 @@ Research note: SailoAI (sailoai.com) is an **independent platform, not part of W
   - Option A: Better Auth's OIDC provider plugin turns this app's auth into the shared login.
   - Option B: we add an OIDC client to the WE360 IdP, link accounts by verified email, and switch the provider.
   - Either way, agents, knowledge and logs are untouched.
+  - **Superseded (2026-11-18):** the shared login exists, WorkEasy360 Accounts, and Agents signs in with it as a relying party ([docs/workeasy360-sso.md](../workeasy360-sso.md)). Option A is rejected: Agents must not become a second identity provider. Option B's email linking is rejected too: people are linked on (issuer, sub), and existing accounts only by an operator.
 - **Super admins:** `users.platform_role` (`super_admin` | `support` | null). 2FA is required for these accounts.
 
 ### 0.4 Model Keys: Platform + BYOK
