@@ -1,5 +1,5 @@
 import { betterAuth } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization, twoFactor } from "better-auth/plugins";
 import { appDb } from "@we360/db";
@@ -8,6 +8,9 @@ import { env } from "../config/env";
 import { notify } from "../modules/notifications/notify";
 import { getOrgLimits, limitOrInfinity } from "../modules/plans/plan-limits";
 import { enqueueOrgCleanup } from "../lib/queue";
+import { authEndpointRefusal } from "../workeasy360/access";
+import { workeasy360Plugin } from "../workeasy360/plugin";
+import { getWorkeasy360Runtime } from "../workeasy360/runtime";
 import { assertSeatAvailable, assertSignupAllowed, deleteAccount, onOrganizationCreated, organizationLimitReached, signInFailures } from "./hooks";
 import { hashPassword, needsRehash, verifyPassword } from "./password";
 
@@ -56,6 +59,22 @@ export const auth = betterAuth({
   // Single-use tokens (password reset, email change) are stored as SHA-256 hashes, so a database
   // read doesn't reveal working links. Better Auth deletes each token when it is used.
   verification: { storeIdentifier: "hashed" },
+  session: {
+    // Every request reads its session from the database, so a session deleted anywhere (sign-out, a
+    // WorkEasy360 back-channel logout, an admin) is refused by every API instance at once. Keep it that way:
+    // a cookie cache or secondary storage would let a revoked session live on until it expired.
+    cookieCache: { enabled: false },
+    // Set only by "Continue with WorkEasy360" (src/workeasy360/plugin.ts); never by the browser.
+    additionalFields: {
+      workeasy360Issuer: { type: "string", required: false, input: false },
+      workeasy360Subject: { type: "string", required: false, input: false },
+      workeasy360Sid: { type: "string", required: false, input: false },
+      workeasy360OrganizationId: { type: "string", required: false, input: false },
+      workeasy360TenantId: { type: "string", required: false, input: false },
+      // id_token_hint for "sign out of WorkEasy360 too"; read from the database, never returned.
+      workeasy360IdToken: { type: "string", required: false, input: false, returned: false },
+    },
+  },
   socialProviders: google,
   // Google sign-in tokens are stored encrypted (with BETTER_AUTH_SECRET), not in plain text.
   account: { encryptOAuthTokens: true },
@@ -80,6 +99,21 @@ export const auth = betterAuth({
   },
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
+      // WorkEasy360 sign-in (docs/workeasy360-sso.md): SSO-only refuses local sign-in and local sessions, and a
+      // WorkEasy360 session stays inside the one organization it was opened for.
+      // Only for requests from a browser: this server's own calls (requireSession's getSession) apply the
+      // same rules themselves, with the API's error format.
+      const runtime = getWorkeasy360Runtime();
+      if (runtime && ctx.request && (runtime.settings.ssoOnly || ctx.path.startsWith("/organization/"))) {
+        const current = await getSessionFromCtx(ctx).catch(() => null);
+        const body = (ctx.body ?? {}) as Record<string, unknown>;
+        const query = (ctx.query ?? {}) as Record<string, unknown>;
+        const ids = [body.organizationId, query.organizationId].map((v) => (typeof v === "string" ? v : undefined));
+        // A slug could name another organization without an id to compare: refused for a WorkEasy360 session.
+        if (typeof body.organizationSlug === "string" || typeof query.organizationSlug === "string") ids.push("by-slug");
+        const refusal = authEndpointRefusal(ctx.path, { session: current?.session as Record<string, unknown> | undefined, organizationIds: ids });
+        if (refusal) throw new APIError(refusal.status, { message: refusal.message, code: refusal.code });
+      }
       // Per-account brute-force protection (per-IP limits alone don't stop a distributed attack).
       if (ctx.path !== "/sign-in/email") return;
       const email = (ctx.body as { email?: unknown } | undefined)?.email;
@@ -176,6 +210,7 @@ export const auth = betterAuth({
       },
     }),
     twoFactor({ issuer: "WorkEasy360 Agents" }),
+    workeasy360Plugin(),
   ],
 });
 

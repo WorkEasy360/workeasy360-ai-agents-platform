@@ -2,8 +2,9 @@ import { createHash, randomBytes } from "node:crypto";
 import type { RequestHandler } from "express";
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { appDb, withTenant } from "@we360/db";
-import { apiKeys, organization } from "@we360/db/schema";
+import { apiKeys, organization, workeasy360Organizations } from "@we360/db/schema";
 import { AppError } from "../../lib/errors";
+import { entitlementRefusal, isWrite } from "../../workeasy360/access";
 
 const PREFIX = "we360_sk_";
 
@@ -40,10 +41,14 @@ export const requireApiKey: RequestHandler = async (req, _res, next) => {
   if (!key) return next(AppError.unauthorized("Invalid or revoked API key."));
 
   const [org] = await appDb()
-    .select({ status: organization.status, planKey: organization.planKey })
+    .select({ status: organization.status, planKey: organization.planKey, workeasy360OrganizationId: workeasy360Organizations.organizationId })
     .from(organization)
+    .leftJoin(workeasy360Organizations, eq(workeasy360Organizations.tenantId, organization.id))
     .where(eq(organization.id, key.org_id));
   if (!org || org.status !== "active") return next(AppError.forbidden("This organization is suspended.", "organization_suspended"));
+  // An organization linked to WorkEasy360 uses its API keys only while WorkEasy360 entitles it.
+  const refusal = await entitlementRefusal(org.workeasy360OrganizationId, { write: isWrite(req.method, req.originalUrl.split("?")[0] ?? "") });
+  if (refusal) return next(refusal);
 
   req.tenant = { orgId: key.org_id, workspaceId: key.workspace_id, role: "member", planKey: org.planKey };
   (req as { apiKeyId?: string }).apiKeyId = key.id;
