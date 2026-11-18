@@ -8,6 +8,10 @@ export interface PlatformSettings {
   emailEnabled: boolean;
   /** false when only invited email addresses can create an account. */
   signupOpen: boolean;
+  /** "Continue with WorkEasy360" is offered (docs/workeasy360-sso.md). */
+  workeasy360?: boolean;
+  /** WorkEasy360 is the only way in: no password or Google sign-in, no sign-up. */
+  ssoOnly?: boolean;
 }
 
 export function usePlatform() {

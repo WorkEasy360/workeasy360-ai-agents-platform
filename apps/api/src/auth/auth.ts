@@ -1,5 +1,5 @@
-import { betterAuth } from "better-auth";
-import { APIError, createAuthMiddleware } from "better-auth/api";
+import { betterAuth, type InternalAdapter } from "better-auth";
+import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization, twoFactor } from "better-auth/plugins";
 import { appDb } from "@we360/db";
@@ -8,6 +8,12 @@ import { env } from "../config/env";
 import { notify } from "../modules/notifications/notify";
 import { getOrgLimits, limitOrInfinity } from "../modules/plans/plan-limits";
 import { enqueueOrgCleanup } from "../lib/queue";
+import { STEP_UP_PATHS, authEndpointRefusal, workeasy360Of } from "../workeasy360/access";
+import { workeasy360Plugin } from "../workeasy360/plugin";
+import { getWorkeasy360Runtime } from "../workeasy360/runtime";
+import { assertStepUpNotLocked, recordStepUp, recordStepUpFailure } from "../workeasy360/step-up";
+import { workeasy360AccountOf } from "../workeasy360/store";
+import { logger } from "../lib/logger";
 import { assertSeatAvailable, assertSignupAllowed, deleteAccount, onOrganizationCreated, organizationLimitReached, signInFailures } from "./hooks";
 import { hashPassword, needsRehash, verifyPassword } from "./password";
 
@@ -15,6 +21,24 @@ const google =
   env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
     ? { google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET } }
     : undefined;
+
+const workeasy360AccountError = () => new APIError("FORBIDDEN", { code: "workeasy360_account", message: "This account signs in with WorkEasy360." });
+
+/**
+ * POST /reset-password while WorkEasy360 sign-in is on: finds the token's user the way Better Auth does (its
+ * verification record, only read here) and refuses a reset that would create a password for a WorkEasy360 user.
+ * An unknown or expired token is left to Better Auth; an account that already has a password can still reset it.
+ */
+async function assertResetAddsNoWorkeasy360Password(adapter: InternalAdapter, body: unknown, query: unknown) {
+  const token = (body as { token?: unknown } | undefined)?.token || (query as { token?: unknown } | undefined)?.token;
+  if (typeof token !== "string" || !token) return;
+  const verification = await adapter.findVerificationValue(`reset-password:${token}`);
+  if (!verification || verification.expiresAt < new Date()) return;
+  const w360 = await workeasy360AccountOf(verification.value);
+  if (!w360.linked || w360.hasPassword) return;
+  logger.warn({ userId: verification.value }, "refused a password reset for a WorkEasy360 user");
+  throw workeasy360AccountError();
+}
 
 export const auth = betterAuth({
   appName: "WorkEasy360 Agents",
@@ -40,6 +64,15 @@ export const auth = betterAuth({
     resetPasswordTokenExpiresIn: 60 * 60,
     revokeSessionsOnPasswordReset: true,
     sendResetPassword: async ({ user, url }) => {
+      // A WorkEasy360 user without a password never gets one by reset while WorkEasy360 sign-in is on (hooks.before
+      // refuses the reset anyway, and databaseHooks.account the password): no link is sent. The answer stays the same.
+      if (getWorkeasy360Runtime()) {
+        const w360 = await workeasy360AccountOf(user.id);
+        if (w360.linked && !w360.hasPassword) {
+          logger.info({ userId: user.id }, "password reset not sent: the account signs in with WorkEasy360");
+          return;
+        }
+      }
       await notify.resetPassword(user.email, url);
     },
     onPasswordReset: async ({ user }) => {
@@ -56,6 +89,24 @@ export const auth = betterAuth({
   // Single-use tokens (password reset, email change) are stored as SHA-256 hashes, so a database
   // read doesn't reveal working links. Better Auth deletes each token when it is used.
   verification: { storeIdentifier: "hashed" },
+  session: {
+    // Every request reads its session from the database, so a session deleted anywhere (sign-out, a
+    // WorkEasy360 back-channel logout, an admin) is refused by every API instance at once. Keep it that way:
+    // a cookie cache or secondary storage would let a revoked session live on until it expired.
+    cookieCache: { enabled: false },
+    // Set only by "Continue with WorkEasy360" (src/workeasy360/plugin.ts); never by the browser.
+    additionalFields: {
+      workeasy360Issuer: { type: "string", required: false, input: false },
+      workeasy360Subject: { type: "string", required: false, input: false },
+      workeasy360Sid: { type: "string", required: false, input: false },
+      workeasy360OrganizationId: { type: "string", required: false, input: false },
+      workeasy360TenantId: { type: "string", required: false, input: false },
+      // id_token_hint for "sign out of WorkEasy360 too"; read from the database, never returned.
+      workeasy360IdToken: { type: "string", required: false, input: false, returned: false },
+      // When this WorkEasy360 session presented Agents' own second factor (the admin step-up: workeasy360/step-up.ts).
+      twoFactorVerifiedAt: { type: "date", required: false, input: false },
+    },
+  },
   socialProviders: google,
   // Google sign-in tokens are stored encrypted (with BETTER_AUTH_SECRET), not in plain text.
   account: { encryptOAuthTokens: true },
@@ -80,6 +131,28 @@ export const auth = betterAuth({
   },
   hooks: {
     before: createAuthMiddleware(async (ctx) => {
+      // WorkEasy360 sign-in (docs/workeasy360-sso.md): SSO-only refuses local sign-in and local sessions, and a
+      // WorkEasy360 session stays inside the one organization it was opened for.
+      // Only for requests from a browser: this server's own calls (requireSession's getSession) apply the
+      // same rules themselves, with the API's error format.
+      const runtime = getWorkeasy360Runtime();
+      const stepUp = STEP_UP_PATHS.has(ctx.path);
+      if (runtime && ctx.request && (runtime.settings.ssoOnly || ctx.path.startsWith("/organization/") || stepUp)) {
+        const current = await getSessionFromCtx(ctx).catch(() => null);
+        const body = (ctx.body ?? {}) as Record<string, unknown>;
+        const query = (ctx.query ?? {}) as Record<string, unknown>;
+        const ids = [body.organizationId, query.organizationId].map((v) => (typeof v === "string" ? v : undefined));
+        // A slug could name another organization without an id to compare: refused for a WorkEasy360 session.
+        if (typeof body.organizationSlug === "string" || typeof query.organizationSlug === "string") ids.push("by-slug");
+        const refusal = authEndpointRefusal(ctx.path, { session: current?.session as Record<string, unknown> | undefined, organizationIds: ids });
+        if (refusal) throw new APIError(refusal.status, { message: refusal.message, code: refusal.code });
+        // The admin step-up of a WorkEasy360 session spends the account's budget of wrong codes (step-up.ts).
+        if (stepUp && current && workeasy360Of(current.session as unknown as Record<string, unknown>)) await assertStepUpNotLocked(current.user.id);
+      }
+      // A reset that would give a WorkEasy360 user a password is refused here, before Better Auth acts on it: it spends
+      // the token and signs the user out everywhere before it writes the password, and this adapter has no
+      // transactions, so the databaseHooks.account refusal (kept as the backstop) alone would leave the user signed out.
+      if (ctx.path === "/reset-password" && runtime) await assertResetAddsNoWorkeasy360Password(ctx.context.internalAdapter, ctx.body, ctx.query);
       // Per-account brute-force protection (per-IP limits alone don't stop a distributed attack).
       if (ctx.path !== "/sign-in/email") return;
       const email = (ctx.body as { email?: unknown } | undefined)?.email;
@@ -88,6 +161,21 @@ export const auth = betterAuth({
       }
     }),
     after: createAuthMiddleware(async (ctx) => {
+      // The admin step-up of a WorkEasy360 session (step-up.ts): Better Auth has just checked the code with that
+      // session. A right code marks this one session; a wrong one counts toward the account's lock.
+      if (STEP_UP_PATHS.has(ctx.path) && ctx.request && getWorkeasy360Runtime()) {
+        const current = await getSessionFromCtx(ctx).catch(() => null);
+        const user = current?.user as { id: string; twoFactorEnabled?: boolean | null } | undefined;
+        if (current && user && workeasy360Of(current.session as unknown as Record<string, unknown>)) {
+          const returned = ctx.context.returned;
+          if (returned instanceof APIError) {
+            if (returned.statusCode === 401) await recordStepUpFailure(user.id);
+          } else if (user.twoFactorEnabled && (returned as { token?: unknown } | undefined)?.token === current.session.token) {
+            await recordStepUp(user.id, current.session.id);
+            logger.info({ userId: user.id, sessionId: current.session.id, method: ctx.path.slice("/two-factor/verify-".length) }, "workeasy360 session presented the second factor");
+          }
+        }
+      }
       if (ctx.path === "/change-password" && !(ctx.context.returned instanceof APIError) && ctx.context.session) {
         await notify.passwordChanged(ctx.context.session.user.email);
       }
@@ -109,6 +197,24 @@ export const auth = betterAuth({
     }),
   },
   databaseHooks: {
+    account: {
+      create: {
+        // Side doors for WorkEasy360 users while WorkEasy360 sign-in is on (docs/workeasy360-sso.md): a user created
+        // by, or linked to, a WorkEasy360 sign-in has a verified address, so Better Auth would otherwise link a
+        // Google sign-in with that address implicitly, and a password reset would add a password. Either way the
+        // person would get a session that WorkEasy360 neither opened nor can end. A password the account already
+        // had stays as it is (it is updated, not created).
+        before: async (newAccount) => {
+          if (!getWorkeasy360Runtime()) return;
+          if (!(await workeasy360AccountOf(newAccount.userId)).linked) return;
+          logger.warn({ userId: newAccount.userId, providerId: newAccount.providerId }, "refused a new sign-in method for a WorkEasy360 user");
+          // A Google link (OAuth callback, link-social) is refused quietly: Better Auth then lands on its error page.
+          if (newAccount.providerId !== "credential") return false;
+          // A password reset is refused before this, in hooks.before; this is the backstop for any other way in.
+          throw workeasy360AccountError();
+        },
+      },
+    },
     user: {
       create: {
         before: async (newUser) => {
@@ -176,6 +282,7 @@ export const auth = betterAuth({
       },
     }),
     twoFactor({ issuer: "WorkEasy360 Agents" }),
+    workeasy360Plugin(),
   ],
 });
 

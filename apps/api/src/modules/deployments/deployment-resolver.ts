@@ -1,7 +1,8 @@
 import { and, eq, isNull, sql } from "drizzle-orm";
 import { appDb, withTenant } from "@we360/db";
-import { type AgentConfig, agentVersions, agents, deployments, organization } from "@we360/db/schema";
+import { type AgentConfig, agentVersions, agents, deployments, organization, workeasy360Organizations } from "@we360/db/schema";
 import { AppError } from "../../lib/errors";
+import { entitlementRefusal } from "../../workeasy360/access";
 
 export interface ResolvedDeployment {
   deployment: typeof deployments.$inferSelect;
@@ -32,8 +33,15 @@ export async function resolvePublicDeployment(publicKey: string): Promise<Resolv
   const ref = result.rows[0];
   if (!ref) throw AppError.notFound("Agent");
 
-  const [org] = await appDb().select({ status: organization.status, planKey: organization.planKey }).from(organization).where(eq(organization.id, ref.org_id));
+  const [org] = await appDb()
+    .select({ status: organization.status, planKey: organization.planKey, workeasy360OrganizationId: workeasy360Organizations.organizationId })
+    .from(organization)
+    .leftJoin(workeasy360Organizations, eq(workeasy360Organizations.tenantId, organization.id))
+    .where(eq(organization.id, ref.org_id));
   if (!org || org.status !== "active") throw new AppError(503, "agent_unavailable", "This agent is currently unavailable.");
+  // An organization linked to WorkEasy360 serves its public channels only while WorkEasy360 entitles it.
+  // Visitors are told only that the agent is unavailable.
+  if (await entitlementRefusal(org.workeasy360OrganizationId, { write: false })) throw new AppError(503, "agent_unavailable", "This agent is currently unavailable.");
 
   const [deployment] = await withTenant(ref.org_id, (tx) => tx.select().from(deployments).where(eq(deployments.id, ref.id)));
   if (!deployment || deployment.status !== "active") throw new AppError(503, "agent_unavailable", "This agent is currently unavailable.");

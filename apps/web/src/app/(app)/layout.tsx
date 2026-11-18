@@ -53,11 +53,21 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
     router.push("/");
   };
 
+  // Signs out of Agents only. A WorkEasy360 session can also sign out of WorkEasy360: the API ends this
+  // session first, then the browser visits WorkEasy360's sign-out page (it asks the person to confirm).
   const signOut = async () => {
     await authClient.signOut();
     queryClient.clear();
     router.replace("/login");
   };
+  const signOutEverywhere = async () => {
+    const res = await fetch("/api/auth/workeasy360/sign-out", { method: "POST", credentials: "include", headers: { "content-type": "application/json" }, body: "{}" });
+    const body = (await res.json().catch(() => ({}))) as { redirect?: string | null };
+    queryClient.clear();
+    if (body.redirect) window.location.assign(body.redirect);
+    else router.replace("/login");
+  };
+  const viaWorkeasy360 = me.signedInWith === "workeasy360";
 
   const navLinks = (mobile: boolean) =>
     nav.map(({ href, label, icon: Icon }) => (
@@ -136,6 +146,11 @@ export default function AppLayout({ children }: { children: React.ReactNode }) {
           <button className="mt-2 text-xs text-[var(--muted)] hover:underline" onClick={signOut}>
             Sign out
           </button>
+          {viaWorkeasy360 && (
+            <button className="mt-1 block text-xs text-[var(--muted)] hover:underline" onClick={signOutEverywhere}>
+              Sign out of WorkEasy360 too
+            </button>
+          )}
         </div>
       </aside>
       <main className="min-w-0 flex-1 px-4 py-6 md:px-10 md:py-8">{children}</main>

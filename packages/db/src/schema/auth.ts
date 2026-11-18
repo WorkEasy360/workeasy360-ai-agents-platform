@@ -50,8 +50,30 @@ export const session = pgTable(
       .notNull()
       .references(() => user.id, { onDelete: "cascade" }),
     activeOrganizationId: text("active_organization_id"),
+    // Set only on a session opened by "Continue with WorkEasy360" (apps/api/src/workeasy360, docs/workeasy360-sso.md).
+    // Declared as session additionalFields in apps/api/src/auth/auth.ts, so `npx auth generate` keeps the columns;
+    // re-apply the two workeasy360 indexes below after regenerating. A back-channel logout deletes the rows it
+    // names by (issuer, sid) or (issuer, subject).
+    workeasy360Issuer: text("workeasy360_issuer"),
+    workeasy360Subject: text("workeasy360_subject"),
+    workeasy360Sid: text("workeasy360_sid"),
+    /** The WorkEasy360 organization the ID token named. */
+    workeasy360OrganizationId: text("workeasy360_organization_id"),
+    /** The one Agents organization this session may use (the tenant that organization maps to). */
+    workeasy360TenantId: text("workeasy360_tenant_id"),
+    /** Kept only as id_token_hint for "sign out of WorkEasy360 too"; never returned to the browser. */
+    workeasy360IdToken: text("workeasy360_id_token"),
+    /**
+     * When this session presented Agents' own second factor after it was opened (the admin step-up of a
+     * WorkEasy360 session: apps/api/src/workeasy360/step-up.ts). Per session: a new sign-in starts without it.
+     */
+    twoFactorVerifiedAt: timestamp("two_factor_verified_at", { withTimezone: true }),
   },
-  (table) => [index("session_userId_idx").on(table.userId)],
+  (table) => [
+    index("session_userId_idx").on(table.userId),
+    index("session_workeasy360_sid_idx").on(table.workeasy360Issuer, table.workeasy360Sid),
+    index("session_workeasy360_subject_idx").on(table.workeasy360Issuer, table.workeasy360Subject),
+  ],
 );
 
 export const account = pgTable(

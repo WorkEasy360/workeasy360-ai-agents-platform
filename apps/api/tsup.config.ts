@@ -10,6 +10,7 @@ export default defineConfig({
     "scripts/migrate": "src/scripts/migrate.ts",
     "scripts/table-counts": "src/scripts/table-counts.ts",
     "scripts/seed": "src/scripts/seed.ts",
+    "scripts/workeasy360": "src/scripts/workeasy360.ts",
   },
   format: ["esm"],
   target: "node22",

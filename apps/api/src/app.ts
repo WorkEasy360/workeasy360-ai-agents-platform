@@ -29,8 +29,16 @@ import { runsRouter } from "./modules/runs/runs.routes";
 import { toolsRouter } from "./modules/tools/tools.routes";
 import { usageRouter } from "./modules/usage/usage.routes";
 import { workspacesRouter } from "./modules/workspaces/workspaces.routes";
+import { workeasy360Router } from "./workeasy360/routes";
+import { runtimeFromEnv, setWorkeasy360Runtime, type Workeasy360Runtime } from "./workeasy360/runtime";
 
-export function createApp() {
+export interface AppOptions {
+  /** WorkEasy360 sign-in; undefined reads the WORKEASY360_* environment, null turns it off. */
+  workeasy360?: Workeasy360Runtime | null;
+}
+
+export function createApp(options: AppOptions = {}) {
+  setWorkeasy360Runtime(options.workeasy360 === undefined ? runtimeFromEnv() : (options.workeasy360 ?? undefined));
   const app = express();
   app.disable("x-powered-by");
   // Proxy hops in front of the API: 1 locally (Next.js) and behind the ALB; 2 with CloudFront in front.
@@ -83,6 +91,11 @@ export function createApp() {
     ],
     rateLimit({ name: "auth-sensitive", limit: Number(process.env.AUTH_RATE_LIMIT ?? 10), windowSec: 60, key: (req) => req.ip ?? "unknown" }),
   );
+
+  // Sign-in with WorkEasy360 Accounts (docs/workeasy360-sso.md): the back-channel logout receiver. Start,
+  // callback and sign-out are Better Auth endpoints (workeasy360/plugin.ts); starts are rate-limited per IP.
+  app.use("/api/auth/workeasy360/start", rateLimit({ name: "w360-start", limit: Number(process.env.AUTH_RATE_LIMIT ?? 30), windowSec: 60, key: (req) => req.ip ?? "unknown" }));
+  app.use("/api/auth/workeasy360", workeasy360Router());
 
   // Better Auth reads the raw body itself, so it is mounted before express.json().
   app.all("/api/auth/*splat", toNodeHandler(auth));
