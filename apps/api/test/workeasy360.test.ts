@@ -4,7 +4,7 @@
  * entitlement and end-session; keys generated when it starts).
  */
 import { spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHmac, randomUUID } from "node:crypto";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
@@ -14,10 +14,11 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import request from "supertest";
 import { and, eq, inArray, sql } from "drizzle-orm";
 import { adminDb, closeDb } from "@we360/db";
-import { member, organization, session, user, workeasy360Entitlements, workeasy360Identities, workeasy360LoginFlows, workeasy360Organizations } from "@we360/db/schema";
+import { account, member, organization, session, twoFactor, user, workeasy360Entitlements, workeasy360Identities, workeasy360LoginFlows, workeasy360Organizations } from "@we360/db/schema";
 import { createApp } from "../src/app";
 import { auth } from "../src/auth/auth";
-import { closeQueues } from "../src/lib/queue";
+import { env } from "../src/config/env";
+import { closeQueues, getEmailQueue, redis } from "../src/lib/queue";
 import type { Workeasy360Settings } from "../src/workeasy360/config";
 import { createWorkeasy360Runtime, setWorkeasy360Runtime } from "../src/workeasy360/runtime";
 import { linkOrganization, linkUser, moveIssuer } from "../src/workeasy360/store";
@@ -865,5 +866,240 @@ describe("membership", () => {
     await adminDb().update(member).set({ role: "admin" }).where(and(eq(member.organizationId, first.tenantId!), eq(member.userId, identity!.userId)));
     const again = await signIn(colleague);
     expect((await again.agent.get("/api/v1/me")).body.organizations[0].role).toBe("admin");
+  });
+});
+
+// --- Agents' own second factor for the admin area, and the Better Auth side doors -------------------------------
+
+/** RFC 6238 TOTP (SHA-1, 6 digits, 30 s) for the base32 secret of an otpauth:// URI. */
+function totp(base32Secret: string, stepOffset = 0): string {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = "";
+  for (const c of base32Secret.replace(/=+$/, "").toUpperCase()) bits += alphabet.indexOf(c).toString(2).padStart(5, "0");
+  const key = Buffer.from((bits.match(/.{8}/g) ?? []).map((b) => parseInt(b, 2)));
+  const counter = Buffer.alloc(8);
+  counter.writeBigUInt64BE(BigInt(Math.floor(Date.now() / 30_000) + stepOffset));
+  const mac = createHmac("sha1", key).update(counter).digest();
+  const offset = mac[mac.length - 1]! & 0x0f;
+  return String((mac.readUInt32BE(offset) & 0x7fffffff) % 1_000_000).padStart(6, "0");
+}
+
+/** A code that is not valid now (nor in the adjacent windows Better Auth accepts). */
+function wrongCode(secret: string): string {
+  const valid = new Set([-1, 0, 1].map((o) => totp(secret, o)));
+  let code = "000000";
+  while (valid.has(code)) code = String(Number(code) + 1).padStart(6, "0");
+  return code;
+}
+
+/** The per-IP limit on Better Auth's two-factor endpoints (5 a minute, app.ts): reset between steps of a test. */
+async function resetTwoFactorRateLimit() {
+  const keys = await redis().keys("rl:auth-2fa:*");
+  if (keys.length) await redis().del(...keys);
+}
+
+const PASSWORD = "correct-horse-battery";
+
+/** A platform admin who turned on Agents' own two-factor authentication (with a password session, as today). */
+async function twoFactorAdmin() {
+  const local = await signUpWithOrg("w360-admin");
+  createdUsers.add(local.userId);
+  createdOrgs.add(local.orgId);
+  await adminDb().update(user).set({ platformRole: "super_admin" }).where(eq(user.id, local.userId));
+  const enable = await local.agent.post("/api/auth/two-factor/enable").set("Origin", ORIGIN).send({ password: PASSWORD });
+  expect(enable.status).toBe(200);
+  const secret = new URL(enable.body.totpURI as string).searchParams.get("secret")!;
+  await resetTwoFactorRateLimit();
+  const verified = await local.agent.post("/api/auth/two-factor/verify-totp").set("Origin", ORIGIN).send({ code: totp(secret) });
+  expect(verified.status).toBe(200);
+  return { ...local, secret, backupCodes: enable.body.backupCodes as string[] };
+}
+
+/** That admin, linked by the operator to a WorkEasy360 person. */
+async function linkedTwoFactorAdmin() {
+  const admin = await twoFactorAdmin();
+  const person = newPerson({ email: admin.email });
+  expect((await linkUser(adminDb(), admin.userId, person.sub, fake.issuer)).ok).toBe(true);
+  return { admin, person };
+}
+
+const overview = (agent: Agent) => agent.get("/api/admin/v1/overview");
+const stepUp = (agent: Agent, code: string, kind: "totp" | "backup-code" = "totp") =>
+  agent.post(`/api/auth/two-factor/verify-${kind}`).set("Origin", ORIGIN).send({ code });
+
+describe("admin dashboard: a WorkEasy360 session presents Agents' own second factor", () => {
+  it("refuses a WorkEasy360 session of a two-factor admin until that session presents a code, and only that session", async () => {
+    const { admin, person } = await linkedTwoFactorAdmin();
+    const first = await signIn(person);
+    expect(first.ssoError).toBeNull();
+    // WorkEasy360 has no MFA and its ID token no amr: the session starts without Agents' second factor.
+    const refused = await overview(first.agent);
+    expect([refused.status, refused.body.code]).toEqual([403, "two_factor_step_up_required"]);
+    expect((await first.agent.get("/api/v1/me")).status).toBe(200);
+
+    await resetTwoFactorRateLimit();
+    const wrong = await stepUp(first.agent, wrongCode(admin.secret));
+    expect(wrong.status).toBe(401);
+    expect((await overview(first.agent)).status).toBe(403);
+    const [counted] = await adminDb().select({ n: twoFactor.failedVerificationCount }).from(twoFactor).where(eq(twoFactor.userId, admin.userId));
+    expect(counted?.n).toBe(1);
+
+    const right = await stepUp(first.agent, totp(admin.secret));
+    expect(right.status).toBe(200);
+    expect((await overview(first.agent)).status).toBe(200);
+    // Still the same WorkEasy360 session (no new session, no password session), and the failure count restarts.
+    const rows = await adminDb()
+      .select({ verifiedAt: session.twoFactorVerifiedAt, subject: session.workeasy360Subject })
+      .from(session)
+      .where(eq(session.userId, admin.userId));
+    expect(rows.filter((r) => r.subject === person.sub)).toHaveLength(1);
+    expect(rows.find((r) => r.subject === person.sub)?.verifiedAt).toBeInstanceOf(Date);
+    const [reset] = await adminDb().select({ n: twoFactor.failedVerificationCount }).from(twoFactor).where(eq(twoFactor.userId, admin.userId));
+    expect(reset?.n).toBe(0);
+
+    // A second WorkEasy360 sign-in (another browser) starts without it; a backup code works, once.
+    const second = await signIn(person);
+    expect((await overview(second.agent)).body.code).toBe("two_factor_step_up_required");
+    expect((await overview(first.agent)).status).toBe(200);
+    await resetTwoFactorRateLimit();
+    expect((await stepUp(second.agent, admin.backupCodes[0]!, "backup-code")).status).toBe(200);
+    expect((await overview(second.agent)).status).toBe(200);
+    const third = await signIn(person);
+    expect((await stepUp(third.agent, admin.backupCodes[0]!, "backup-code")).status).toBe(401);
+    expect((await overview(third.agent)).status).toBe(403);
+  });
+
+  it("leaves password sessions as they were: the code at sign-in is the second factor", async () => {
+    const admin = await twoFactorAdmin();
+    // The session that switched two-factor on, and a new password sign-in through Better Auth's challenge.
+    expect((await overview(admin.agent)).status).toBe(200);
+    const browser = request.agent(app);
+    const signInEmail = await browser.post("/api/auth/sign-in/email").set("Origin", ORIGIN).send({ email: admin.email, password: PASSWORD });
+    expect(signInEmail.body.twoFactorRedirect).toBe(true);
+    expect((await overview(browser)).status).toBe(401);
+    await resetTwoFactorRateLimit();
+    expect((await browser.post("/api/auth/two-factor/verify-totp").set("Origin", ORIGIN).send({ code: totp(admin.secret) })).status).toBe(200);
+    expect((await overview(browser)).status).toBe(200);
+  });
+
+  it("locks the step-up on the account's budget of wrong codes, like Better Auth's sign-in challenge", async () => {
+    const { admin, person } = await linkedTwoFactorAdmin();
+    const r = await signIn(person);
+    await adminDb().update(twoFactor).set({ failedVerificationCount: 9 }).where(eq(twoFactor.userId, admin.userId));
+    await resetTwoFactorRateLimit();
+    expect((await stepUp(r.agent, wrongCode(admin.secret))).status).toBe(401);
+    const locked = await stepUp(r.agent, totp(admin.secret));
+    expect([locked.status, locked.body.code]).toEqual([429, "ACCOUNT_TEMPORARILY_LOCKED"]);
+    expect((await overview(r.agent)).status).toBe(403);
+    // Once the lock has passed, a right code works again.
+    await adminDb().update(twoFactor).set({ lockedUntil: new Date(Date.now() - 1000) }).where(eq(twoFactor.userId, admin.userId));
+    expect((await stepUp(r.agent, totp(admin.secret))).status).toBe(200);
+    expect((await overview(r.agent)).status).toBe(200);
+  });
+
+  it("keeps the step-up open under WORKEASY360_SSO_ONLY for WorkEasy360 sessions only", async () => {
+    const { admin, person } = await linkedTwoFactorAdmin();
+    useRuntime({ ssoOnly: true });
+    try {
+      const r = await signIn(person);
+      await resetTwoFactorRateLimit();
+      expect((await stepUp(r.agent, totp(admin.secret))).status).toBe(200);
+      expect((await overview(r.agent)).status).toBe(200);
+      // Without a WorkEasy360 session it is still a local sign-in step, and refused.
+      const local = await request(app).post("/api/auth/two-factor/verify-totp").set("Origin", ORIGIN).send({ code: totp(admin.secret) });
+      expect([local.status, local.body.code]).toEqual([403, "workeasy360_sso_only"]);
+    } finally {
+      useRuntime();
+    }
+  });
+
+  it("refuses a WorkEasy360 session of an admin without two-factor authentication when it is required, as before", async () => {
+    const local = await signUpWithOrg("w360-admin-no2fa");
+    createdUsers.add(local.userId);
+    createdOrgs.add(local.orgId);
+    await adminDb().update(user).set({ platformRole: "support" }).where(eq(user.id, local.userId));
+    const person = newPerson({ email: local.email });
+    expect((await linkUser(adminDb(), local.userId, person.sub, fake.issuer)).ok).toBe(true);
+    const r = await signIn(person);
+    const mutableEnv = env as { adminRequire2fa: boolean };
+    const before = mutableEnv.adminRequire2fa;
+    mutableEnv.adminRequire2fa = true;
+    try {
+      const refused = await overview(r.agent);
+      expect([refused.status, refused.body.code]).toEqual([403, "two_factor_required"]);
+      expect((await overview(local.agent)).body.code).toBe("two_factor_required");
+    } finally {
+      mutableEnv.adminRequire2fa = before;
+    }
+    // Not required (this test environment): the same as a password session of that admin.
+    expect((await overview(r.agent)).status).toBe(200);
+    expect((await overview(local.agent)).status).toBe(200);
+  });
+});
+
+/** Queued (not yet delivered) emails of one kind to one address. No worker runs in tests, so they stay queued. */
+async function mailTo(to: string, kind: string) {
+  const jobs = await getEmailQueue().getJobs(["waiting", "delayed", "prioritized"]);
+  return jobs.filter((j) => j.data.to === to && j.name === kind).map((j) => j.data as { text: string });
+}
+
+const accountsOf = (userId: string) => adminDb().select({ providerId: account.providerId }).from(account).where(eq(account.userId, userId));
+
+describe("side doors: a WorkEasy360 user gets no password and no Google account while WorkEasy360 sign-in is on", () => {
+  it("refuses a Google link and a password by reset, and keeps an operator-linked account's own password", async () => {
+    const person = newPerson();
+    const r = await signIn(person);
+    const userId = (await r.agent.get("/api/v1/me")).body.user.id as string;
+    const ctx = await auth.$context;
+
+    // Implicit (or explicit) Google linking creates an account row: refused.
+    expect(await ctx.internalAdapter.linkAccount({ providerId: "google", accountId: `g-${randomUUID()}`, userId })).toBeNull();
+    // Password reset: no link is sent, and the reset itself could never add a password.
+    const ask = () => request(app).post("/api/auth/request-password-reset").set("Origin", ORIGIN).send({ email: person.email, redirectTo: `${ORIGIN}/reset-password` });
+    expect((await ask()).status).toBe(200);
+    expect(await mailTo(person.email, "reset-password")).toHaveLength(0);
+    // A link sent while WorkEasy360 sign-in was off is refused once it is on again.
+    setWorkeasy360Runtime(undefined);
+    try {
+      expect((await ask()).status).toBe(200);
+    } finally {
+      useRuntime();
+    }
+    const [mail] = await mailTo(person.email, "reset-password");
+    const token = /reset-password\/([A-Za-z0-9_-]+)/.exec(mail!.text)?.[1];
+    const reset = await request(app).post("/api/auth/reset-password").set("Origin", ORIGIN).send({ token, newPassword: "a-brand-new-password-1" });
+    expect([reset.status, reset.body.code]).toEqual([403, "workeasy360_account"]);
+    expect(await accountsOf(userId)).toHaveLength(0);
+    // The WorkEasy360 session was not touched.
+    expect((await r.agent.get("/api/v1/me")).status).toBe(200);
+
+    // An account linked by the operator keeps the password it had: its reset still works (owner's rule).
+    const local = await signUpWithOrg("w360-sidedoor");
+    createdUsers.add(local.userId);
+    createdOrgs.add(local.orgId);
+    expect((await linkUser(adminDb(), local.userId, randomUUID(), fake.issuer)).ok).toBe(true);
+    const askLocal = await request(app).post("/api/auth/request-password-reset").set("Origin", ORIGIN).send({ email: local.email, redirectTo: `${ORIGIN}/reset-password` });
+    expect(askLocal.status).toBe(200);
+    expect(await mailTo(local.email, "reset-password")).toHaveLength(1);
+    expect(await ctx.internalAdapter.linkAccount({ providerId: "google", accountId: `g-${randomUUID()}`, userId: local.userId })).toBeNull();
+  });
+
+  it("leaves accounts without a WorkEasy360 identity, and WorkEasy360 sign-in switched off, as they were", async () => {
+    const ctx = await auth.$context;
+    const local = await signUpWithOrg("w360-sidedoor-plain");
+    createdUsers.add(local.userId);
+    createdOrgs.add(local.orgId);
+    expect(await ctx.internalAdapter.linkAccount({ providerId: "google", accountId: `g-${randomUUID()}`, userId: local.userId })).not.toBeNull();
+
+    const person = newPerson();
+    const r = await signIn(person);
+    const userId = (await r.agent.get("/api/v1/me")).body.user.id as string;
+    setWorkeasy360Runtime(undefined);
+    try {
+      expect(await ctx.internalAdapter.linkAccount({ providerId: "google", accountId: `g-${randomUUID()}`, userId })).not.toBeNull();
+    } finally {
+      useRuntime();
+    }
+    expect((await accountsOf(userId)).map((a) => a.providerId)).toEqual(["google"]);
   });
 });

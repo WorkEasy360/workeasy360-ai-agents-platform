@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { and, count, eq, gt, inArray, isNull, lt, ne, or, sql } from "drizzle-orm";
 import { appDb, withTenant, type Database } from "@we360/db";
 import {
+  account,
   agents,
   auditLogs,
   member,
@@ -258,6 +259,19 @@ export async function endSessions(
     const ended = await tx.delete(session).where(and(...conditions)).returning({ id: session.id });
     return { replayed: false, sessionsEnded: ended.length };
   });
+}
+
+/**
+ * Whether the user has a WorkEasy360 identity (under any issuer name), and whether it already has a password
+ * (a `credential` account), in one statement. Used to keep Better Auth from adding a password or a Google
+ * account to a WorkEasy360 user (auth.ts, databaseHooks.account and sendResetPassword).
+ */
+export async function workeasy360AccountOf(userId: string, db: Database = appDb()): Promise<{ linked: boolean; hasPassword: boolean }> {
+  const result = await db.execute<{ linked: boolean; has_password: boolean }>(sql`
+    select exists (select 1 from ${workeasy360Identities} where ${workeasy360Identities.userId} = ${userId}) as linked,
+           exists (select 1 from ${account} where ${account.userId} = ${userId} and ${account.providerId} = 'credential') as has_password`);
+  const row = result.rows[0];
+  return { linked: Boolean(row?.linked), hasPassword: Boolean(row?.has_password) };
 }
 
 /** The ID token a WorkEasy360 session was opened with (id_token_hint), read from the database only. */

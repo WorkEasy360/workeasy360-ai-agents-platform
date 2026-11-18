@@ -87,6 +87,12 @@ export async function entitlementRefusal(
   return undefined;
 }
 
+/**
+ * Better Auth's two-factor verification endpoints (paths under /api/auth). Called with a WorkEasy360 session they
+ * sign nobody in: they are that session's admin step-up (step-up.ts).
+ */
+export const STEP_UP_PATHS: ReadonlySet<string> = new Set(["/two-factor/verify-totp", "/two-factor/verify-backup-code"]);
+
 /** Better Auth endpoints (paths relative to /api/auth) that sign someone in without WorkEasy360. */
 const LOCAL_SIGN_IN_PATHS = [/^\/sign-in\//, /^\/sign-up\//, /^\/callback\//, /^\/request-password-reset$/, /^\/forget-password$/, /^\/reset-password/, /^\/verify-email$/, /^\/two-factor\/verify/];
 
@@ -107,7 +113,10 @@ export function authEndpointRefusal(
   const runtime = getWorkeasy360Runtime();
   const w360 = workeasy360Of(request.session);
   if (runtime?.settings.ssoOnly) {
-    if (LOCAL_SIGN_IN_PATHS.some((p) => p.test(path))) {
+    // Better Auth's two-factor verification with a WorkEasy360 session signs nobody in: it is that session's
+    // step-up for the admin area (step-up.ts), so it stays open under SSO-only.
+    const stepUp = w360 !== undefined && STEP_UP_PATHS.has(path);
+    if (!stepUp && LOCAL_SIGN_IN_PATHS.some((p) => p.test(path))) {
       return { status: "FORBIDDEN", code: "workeasy360_sso_only", message: "Sign in with WorkEasy360." };
     }
     if (request.session && !w360 && path !== "/sign-out") {

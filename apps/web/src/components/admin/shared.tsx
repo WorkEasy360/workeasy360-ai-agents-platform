@@ -6,6 +6,7 @@ import { Button, Card, Dialog, Field, FormError, Textarea } from "@/components/u
 import { ApiError } from "@/lib/api";
 import { cn } from "@/lib/cn";
 import { useMe } from "@/lib/use-me";
+import { StepUpPrompt, isStepUpRequired } from "./step-up";
 
 /** Base path of the super admin API. */
 export const ADMIN_API = "/api/admin/v1";
@@ -29,6 +30,7 @@ export function errorText(error: unknown): string | null {
   if (!error) return null;
   if (error instanceof ApiError) {
     if (error.code === "two_factor_required") return "Enable two-factor authentication on your account to use the admin dashboard.";
+    if (error.code === "two_factor_step_up_required") return "Enter a code from your authenticator app to use the admin dashboard.";
     if (error.status === 403) return "You don't have permission to do that.";
     return error.message;
   }
@@ -36,6 +38,8 @@ export function errorText(error: unknown): string | null {
 }
 
 export function QueryError({ error }: { error: unknown }) {
+  // A WorkEasy360 session asks for Agents' own second factor once, right where the admin data would be.
+  if (isStepUpRequired(error)) return <StepUpPrompt />;
   return <FormError message={errorText(error)} />;
 }
 

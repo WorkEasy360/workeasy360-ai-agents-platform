@@ -63,6 +63,11 @@ export const session = pgTable(
     workeasy360TenantId: text("workeasy360_tenant_id"),
     /** Kept only as id_token_hint for "sign out of WorkEasy360 too"; never returned to the browser. */
     workeasy360IdToken: text("workeasy360_id_token"),
+    /**
+     * When this session presented Agents' own second factor after it was opened (the admin step-up of a
+     * WorkEasy360 session: apps/api/src/workeasy360/step-up.ts). Per session: a new sign-in starts without it.
+     */
+    twoFactorVerifiedAt: timestamp("two_factor_verified_at", { withTimezone: true }),
   },
   (table) => [
     index("session_userId_idx").on(table.userId),

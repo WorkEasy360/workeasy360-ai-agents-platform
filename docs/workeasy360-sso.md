@@ -37,6 +37,30 @@ Because the session is an ordinary Better Auth session, every existing route (`r
 - Better Auth's organization endpoints refuse a WorkEasy360 session that names another organization, creates or deletes an organization, or accepts an invitation (403 `workeasy360_organizations` / `workeasy360_other_organization`). Organizations and who belongs to them come from WorkEasy360.
 - Inside the organization, roles decide, as before (`owner` / `admin` / `member`).
 
+## Admin dashboard: Agents' own second factor
+
+WorkEasy360 has no MFA today, and its ID token carries no `amr`. Agents never reads an `amr`, missing or present, as proof of a second factor. So **a WorkEasy360 session starts without Agents' second factor**, and the super admin API (`/api/admin/v1`, `requirePlatformRole` in `apps/api/src/middleware/platform-admin.ts`) treats it exactly as it treats a password sign-in:
+
+| Platform admin (`platformRole`) | Password session | WorkEasy360 session |
+|---|---|---|
+| Two-factor authentication **on** | Better Auth's challenge asked for the TOTP or a backup code before the session existed: admin works. | 403 **`two_factor_step_up_required`** until **this session** presents the TOTP or a backup code (below). Then admin works for this session only. |
+| Two-factor authentication off, `ADMIN_REQUIRE_2FA` on (production default) | 403 `two_factor_required` | 403 `two_factor_required` (unchanged) |
+| Two-factor authentication off, `ADMIN_REQUIRE_2FA=false` | Admin works | Admin works (unchanged) |
+
+**The step-up** is Better Auth's own two-factor verification, sent with the WorkEasy360 session cookie:
+
+```
+POST /api/auth/two-factor/verify-totp          { "code": "123456" }
+POST /api/auth/two-factor/verify-backup-code   { "code": "abcde-12345" }
+```
+
+With a session, Better Auth only checks the code against the user's own secret (a backup code is used up) and opens no new session. `apps/api/src/workeasy360/step-up.ts` (called from `auth.ts` hooks) then stamps that one session (`session.two_factor_verified_at`, migration `0003`). Another session, even of the same person in another browser, must step up itself; a new WorkEasy360 sign-in always starts without it.
+
+- **Wrong codes:** Better Auth's sign-in challenge counts wrong codes per account, but its session mode does not. A WorkEasy360 step-up spends the same per-account budget with Better Auth's defaults: 10 wrong codes in a row lock the factor for 15 minutes (429 `ACCOUNT_TEMPORARILY_LOCKED`), on top of the per-IP limit (5 a minute) on these endpoints. A right code restarts the count.
+- **SSO-only:** these two endpoints stay open for WorkEasy360 sessions (they sign nobody in), and stay refused (403 `workeasy360_sso_only`) for anyone else.
+- **Web:** the admin pages show the code prompt on `two_factor_step_up_required` (`apps/web/src/components/admin/step-up.tsx`).
+- A WorkEasy360 user can only have two-factor authentication if the account had it before `link-user`, or turned it on with the account's password: an account created by WorkEasy360 sign-in has no password, and so no admin rights either unless an operator grants them.
+
 ## Entitlement, on WorkEasy360's schedule
 
 Every tenant request (`requireTenant`) to an Agents organization linked to WorkEasy360 asks `entitlementRefusal` (`apps/api/src/workeasy360/access.ts`). This includes password and Google sessions of members of a linked organization (asked per organization), the organization's **API keys**, and its **public deployments** (hosted page and widget answer `agent_unavailable`).
@@ -87,6 +111,12 @@ The receiver answers **200** when the token verifies, including a **duplicate** 
 | Password or Google account with a different email address | Untouched. The WorkEasy360 person is a separate user. |
 | A WorkEasy360 identity under a **previous issuer name** (e.g. `https://auth.workeasy360.com` to `https://accounts.workeasy360.com`, ADR-067) | **Refused** with `sso_error=identity_conflict`, and its sessions are refused per request, instead of silently creating a second account for the same `sub`. Run `move-issuer` in the same release that changes `WORKEASY360_ISSUER`. |
 | An Agents organization that should receive a WorkEasy360 organization's sign-ins | Run `link-organization` **before** the organization's first sign-in (or afterwards with `--replace-empty`). Its password members are then subject to that organization's entitlement too. |
+
+**No side doors for WorkEasy360 users** while WorkEasy360 sign-in is on (`WORKEASY360_ISSUER` set), even with `WORKEASY360_SSO_ONLY=false`. A user created by a WorkEasy360 sign-in has a verified address (`emailVerified: true`), and Better Auth would otherwise let a Google sign-in with that address link to it implicitly, and a password reset add a password. Either way the person would get a session that WorkEasy360 did not open, that a back-channel logout does not end, and that is checked per organization only. So for any user with a WorkEasy360 identity (`auth.ts`, `databaseHooks.account.create` and `sendResetPassword`):
+
+- a new Google account (implicit linking at Google sign-in, or `link-social`) is refused: Better Auth lands on its error page ("unable to link account");
+- a password reset for an account without a password sends no link (the answer is the same as for any address), and a reset that would create a password answers 403 `workeasy360_account`;
+- what the account already had stays as it is: an account linked by `link-user` keeps its password (it can still reset it) and any Google sign-in it already had, until `WORKEASY360_SSO_ONLY=true` refuses both.
 
 **With `WORKEASY360_SSO_ONLY=true`:**
 
@@ -216,7 +246,9 @@ In production: `curl -s -o /dev/null -w '%{http_code}\n' -H 'Cookie: __Secure-be
 - cross-organization access refused (same person in two organizations, and somebody else's organization), Better Auth's organization endpoints, no provisioning when switched off;
 - logout tokens: by `sid`, by `sub`, a duplicate, a replayed `jti`, and forged ones (another key, another issuer, another audience, a wrong `typ`, no event, a nonce, neither `sub` nor `sid`, too old, an ID token, no token);
 - **two API instances** (this process and a second `src/server.ts` process configured from the environment) sharing the database: a logout token delivered to either one is refused by both at once; no cookie cache;
-- both sign-outs; accounts never merged by email and the operator links; the issuer move; SSO-only; WorkEasy360 switched off.
+- both sign-outs; accounts never merged by email and the operator links; the issuer move; SSO-only; WorkEasy360 switched off;
+- the admin dashboard's second factor: a WorkEasy360 session of a two-factor admin refused until it steps up (TOTP or backup code), only for that session, a wrong code refused and counted, the lock, SSO-only, password sessions unchanged, `ADMIN_REQUIRE_2FA` unchanged;
+- the side doors: no Google account and no password by reset for a WorkEasy360 user, an operator-linked account's own password kept, other accounts and WorkEasy360 switched off unchanged.
 
 `apps/api/test/workeasy360-config.test.ts` covers the configuration rules.
 
@@ -232,4 +264,5 @@ In production: `curl -s -o /dev/null -w '%{http_code}\n' -H 'Cookie: __Secure-be
 - **Automatic start** for SSO-only products (integration guide §6b): someone who opens Agents without a session sees the sign-in page with "Continue with WorkEasy360" instead of being sent to WorkEasy360 directly.
 - **Self-service linking** ("connect my WorkEasy360 account" while signed in with a password): only the operator command links accounts today.
 - `prompt=login` ("confirm it's you") for sensitive actions is not used; Better Auth's own fresh-session rules apply.
+- **Google sessions and the admin dashboard (not WorkEasy360's, noted here):** Better Auth's two-factor challenge runs only for email, username and phone-number sign-in, so a Google sign-in of a platform admin with two-factor authentication gets a session without the code. The step-up above applies only to WorkEasy360 sessions. Extending it to Google sessions (stamp sessions that passed the challenge, step up the rest) would also ask existing password sessions to step up once, so it is left as a decision.
 - Better Auth's `GET /api/auth/organization/list` still lists every organization the user belongs to; the session can use only its own.
