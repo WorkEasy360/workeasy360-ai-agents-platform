@@ -1081,6 +1081,11 @@ describe("side doors: a WorkEasy360 user gets no password and no Google account 
     const askLocal = await request(app).post("/api/auth/request-password-reset").set("Origin", ORIGIN).send({ email: local.email, redirectTo: `${ORIGIN}/reset-password` });
     expect(askLocal.status).toBe(200);
     expect(await mailTo(local.email, "reset-password")).toHaveLength(1);
+    const [localMail] = await mailTo(local.email, "reset-password");
+    const localToken = /reset-password\/([A-Za-z0-9_-]+)/.exec(localMail!.text)?.[1];
+    const localReset = await request(app).post("/api/auth/reset-password").set("Origin", ORIGIN).send({ token: localToken, newPassword: "a-brand-new-password-2" });
+    expect(localReset.status).toBe(200);
+    expect((await accountsOf(local.userId)).map((a) => a.providerId)).toEqual(["credential"]);
     expect(await ctx.internalAdapter.linkAccount({ providerId: "google", accountId: `g-${randomUUID()}`, userId: local.userId })).toBeNull();
   });
 

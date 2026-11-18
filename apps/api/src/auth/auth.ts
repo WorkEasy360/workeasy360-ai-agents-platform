@@ -1,4 +1,4 @@
-import { betterAuth } from "better-auth";
+import { betterAuth, type InternalAdapter } from "better-auth";
 import { APIError, createAuthMiddleware, getSessionFromCtx } from "better-auth/api";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { organization, twoFactor } from "better-auth/plugins";
@@ -21,6 +21,24 @@ const google =
   env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET
     ? { google: { clientId: env.GOOGLE_CLIENT_ID, clientSecret: env.GOOGLE_CLIENT_SECRET } }
     : undefined;
+
+const workeasy360AccountError = () => new APIError("FORBIDDEN", { code: "workeasy360_account", message: "This account signs in with WorkEasy360." });
+
+/**
+ * POST /reset-password while WorkEasy360 sign-in is on: finds the token's user the way Better Auth does (its
+ * verification record, only read here) and refuses a reset that would create a password for a WorkEasy360 user.
+ * An unknown or expired token is left to Better Auth; an account that already has a password can still reset it.
+ */
+async function assertResetAddsNoWorkeasy360Password(adapter: InternalAdapter, body: unknown, query: unknown) {
+  const token = (body as { token?: unknown } | undefined)?.token || (query as { token?: unknown } | undefined)?.token;
+  if (typeof token !== "string" || !token) return;
+  const verification = await adapter.findVerificationValue(`reset-password:${token}`);
+  if (!verification || verification.expiresAt < new Date()) return;
+  const w360 = await workeasy360AccountOf(verification.value);
+  if (!w360.linked || w360.hasPassword) return;
+  logger.warn({ userId: verification.value }, "refused a password reset for a WorkEasy360 user");
+  throw workeasy360AccountError();
+}
 
 export const auth = betterAuth({
   appName: "WorkEasy360 Agents",
@@ -46,8 +64,8 @@ export const auth = betterAuth({
     resetPasswordTokenExpiresIn: 60 * 60,
     revokeSessionsOnPasswordReset: true,
     sendResetPassword: async ({ user, url }) => {
-      // A WorkEasy360 user without a password never gets one by reset while WorkEasy360 sign-in is on (the
-      // databaseHooks.account guard below refuses it anyway): no link is sent. The answer stays the same.
+      // A WorkEasy360 user without a password never gets one by reset while WorkEasy360 sign-in is on (hooks.before
+      // refuses the reset anyway, and databaseHooks.account the password): no link is sent. The answer stays the same.
       if (getWorkeasy360Runtime()) {
         const w360 = await workeasy360AccountOf(user.id);
         if (w360.linked && !w360.hasPassword) {
@@ -131,6 +149,10 @@ export const auth = betterAuth({
         // The admin step-up of a WorkEasy360 session spends the account's budget of wrong codes (step-up.ts).
         if (stepUp && current && workeasy360Of(current.session as unknown as Record<string, unknown>)) await assertStepUpNotLocked(current.user.id);
       }
+      // A reset that would give a WorkEasy360 user a password is refused here, before Better Auth acts on it: it spends
+      // the token and signs the user out everywhere before it writes the password, and this adapter has no
+      // transactions, so the databaseHooks.account refusal (kept as the backstop) alone would leave the user signed out.
+      if (ctx.path === "/reset-password" && runtime) await assertResetAddsNoWorkeasy360Password(ctx.context.internalAdapter, ctx.body, ctx.query);
       // Per-account brute-force protection (per-IP limits alone don't stop a distributed attack).
       if (ctx.path !== "/sign-in/email") return;
       const email = (ctx.body as { email?: unknown } | undefined)?.email;
@@ -188,7 +210,8 @@ export const auth = betterAuth({
           logger.warn({ userId: newAccount.userId, providerId: newAccount.providerId }, "refused a new sign-in method for a WorkEasy360 user");
           // A Google link (OAuth callback, link-social) is refused quietly: Better Auth then lands on its error page.
           if (newAccount.providerId !== "credential") return false;
-          throw new APIError("FORBIDDEN", { code: "workeasy360_account", message: "This account signs in with WorkEasy360." });
+          // A password reset is refused before this, in hooks.before; this is the backstop for any other way in.
+          throw workeasy360AccountError();
         },
       },
     },
