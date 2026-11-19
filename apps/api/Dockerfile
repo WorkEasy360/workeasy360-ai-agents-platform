@@ -19,9 +19,13 @@ FROM node:22-alpine@sha256:0a7108bf6c7bf5de370ffb1a3ed6be93d405b43ff159f681a8d18
 WORKDIR /app
 ENV NODE_ENV=production
 # Trust the RDS CA so database connections can verify the server certificate (sslmode=verify-full).
-# Pinned checksum: the build fails if the downloaded bundle changes. When AWS publishes a new bundle,
-# re-run: curl -sL <url> | sha256sum, verify it on the AWS docs page, then update the hash below.
-ADD --chmod=644 --checksum=sha256:fe45bbebf92ad3e27a583bbb2ddd1553c521ed4d49af5514dc0a40372ea5395c \
+# Pinned checksum: the build fails if the downloaded bundle changes. AWS publishes no checksum, so when it
+# publishes a new bundle (it adds roots for each new region), compare its certificates with the previous
+# bundle's (extract /etc/ssl/rds-global-bundle.pem from the last deployed image): every added certificate must
+# be a self-signed "Amazon RDS <region> Root CA" from Amazon Web Services, Inc. that also appears in that
+# region's bundle, https://truststore.pki.rds.amazonaws.com/<region>/<region>-bundle.pem. Then update the hash.
+# 2026-11-18: AWS's 2026-10-14 bundle adds the three sa-west-1 (Chile) roots and removes nothing.
+ADD --chmod=644 --checksum=sha256:90a6f1a7978a1b1b096dca6c57511ca48d3b8cf052f8e704baf358f34ea2f21b \
     https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem /etc/ssl/rds-global-bundle.pem
 ENV NODE_EXTRA_CA_CERTS=/etc/ssl/rds-global-bundle.pem
 COPY --from=build /out/node_modules ./node_modules
