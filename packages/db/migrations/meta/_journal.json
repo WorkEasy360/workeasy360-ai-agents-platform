@@ -15,6 +15,20 @@
       "when": 1791695200415,
       "tag": "0001_lookup_functions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794988003478,
+      "tag": "0002_workeasy360_sso",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1795031654341,
+      "tag": "0003_session_two_factor_step_up",
+      "breakpoints": true
     }
   ]
 }

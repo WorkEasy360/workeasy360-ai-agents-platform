@@ -6,6 +6,7 @@ import { useState } from "react";
 import { Button, Card, FormError, Input, Label, Notice } from "@/components/ui";
 import { authClient } from "@/lib/auth-client";
 import { GoogleButton } from "@/components/google-button";
+import { Workeasy360Button } from "@/components/workeasy360";
 import { usePlatform } from "@/lib/use-platform";
 
 export default function SignupPage() {
@@ -27,6 +28,18 @@ export default function SignupPage() {
     setPending(false);
     if (error) return setError(error.message ?? "Couldn't create your account.");
     router.push("/onboarding");
+  }
+
+  if (platform?.ssoOnly) {
+    return (
+      <Card>
+        <h1 className="mb-1 text-xl font-semibold">Create your account</h1>
+        <p className="mb-4 text-sm text-[var(--muted)]">
+          WorkEasy360 Agents uses your WorkEasy360 account. Your organization gets Agents in WorkEasy360.
+        </p>
+        <Workeasy360Button primary />
+      </Card>
+    );
   }
 
   return (
@@ -58,6 +71,7 @@ export default function SignupPage() {
         </Button>
       </form>
       <GoogleButton />
+      {platform?.workeasy360 && <Workeasy360Button />}
       <p className="mt-6 text-center text-sm text-[var(--muted)]">
         Already have an account?{" "}
         <Link href="/login" className="font-medium text-brand-600 hover:underline">

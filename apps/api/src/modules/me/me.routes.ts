@@ -1,15 +1,18 @@
 import { Router } from "express";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { appDb } from "@we360/db";
 import { member, organization } from "@we360/db/schema";
 import { planAccountDeletion } from "../../auth/hooks";
 import { requireSession } from "../../middleware/auth";
+import { workeasy360Of } from "../../workeasy360/access";
 
 export const meRouter = Router();
 
 /** The signed-in user, their organizations and roles. Used by the web app on load. */
 meRouter.get("/", requireSession, async (req, res) => {
   const { user, session } = req.auth!;
+  // A WorkEasy360 session lists only the organization it was opened for.
+  const w360 = workeasy360Of(session as unknown as Record<string, unknown>);
   const orgs = await appDb()
     .select({
       id: organization.id,
@@ -22,7 +25,7 @@ meRouter.get("/", requireSession, async (req, res) => {
     })
     .from(member)
     .innerJoin(organization, eq(organization.id, member.organizationId))
-    .where(eq(member.userId, user.id))
+    .where(w360 ? and(eq(member.userId, user.id), eq(member.organizationId, w360.tenantId)) : eq(member.userId, user.id))
     .orderBy(organization.name);
 
   const u = user as typeof user & { platformRole?: string | null; twoFactorEnabled?: boolean | null };
@@ -36,8 +39,10 @@ meRouter.get("/", requireSession, async (req, res) => {
       twoFactorEnabled: Boolean(u.twoFactorEnabled),
       platformRole: u.platformRole ?? null,
     },
-    activeOrganizationId: session.activeOrganizationId ?? null,
+    activeOrganizationId: w360 ? w360.tenantId : (session.activeOrganizationId ?? null),
     organizations: orgs,
+    // How this session signed in: the web app offers "Sign out of WorkEasy360 too" for "workeasy360".
+    signedInWith: w360 ? "workeasy360" : "local",
   });
 });
 

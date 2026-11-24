@@ -14,6 +14,8 @@ export interface Me {
     platformRole: "super_admin" | "support" | null;
   };
   activeOrganizationId: string | null;
+  /** "workeasy360": this session came from WorkEasy360 Accounts and is bound to one organization. */
+  signedInWith?: "workeasy360" | "local";
   organizations: Array<{
     id: string;
     name: string;

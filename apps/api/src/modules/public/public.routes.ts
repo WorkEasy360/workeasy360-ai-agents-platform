@@ -11,6 +11,7 @@ import { resolvePublicDeployment } from "../deployments/deployment-resolver";
 import { getOrgLimits } from "../plans/plan-limits";
 import { eraseConversations } from "../privacy/privacy.service";
 import { prepareRun, streamRun, toPublicEvent } from "../runs/run.service";
+import { getWorkeasy360Runtime } from "../../workeasy360/runtime";
 
 /**
  * Unauthenticated endpoints for the hosted chat page and the web widget.
@@ -21,7 +22,15 @@ export const publicRouter = Router();
 
 /** What the sign-in pages need to know about this server (no secrets). */
 publicRouter.get("/platform", (_req, res) => {
-  res.json({ emailEnabled: env.emailEnabled, signupOpen: env.allowPublicSignup });
+  const workeasy360 = getWorkeasy360Runtime();
+  const ssoOnly = Boolean(workeasy360?.settings.ssoOnly);
+  res.json({
+    emailEnabled: env.emailEnabled,
+    signupOpen: env.allowPublicSignup && !ssoOnly,
+    // "Continue with WorkEasy360" (docs/workeasy360-sso.md); with ssoOnly, password and Google sign-in are off.
+    workeasy360: Boolean(workeasy360),
+    ssoOnly,
+  });
 });
 
 publicRouter.get("/deployments/:publicKey", async (req, res) => {

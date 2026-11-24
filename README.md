@@ -8,7 +8,7 @@ Architecture and launch plan: [docs/architecture/agent-platform-blueprint.md](do
 
 | Area | Features |
 |---|---|
-| Accounts | Email/password and Google sign-in, email verification, organizations, invites, roles (owner/admin/member), two-factor authentication, audit log, data export, organization deletion |
+| Accounts | Email/password and Google sign-in, **sign-in with WorkEasy360 Accounts** (OpenID Connect, off until configured: [docs/workeasy360-sso.md](docs/workeasy360-sso.md)), email verification, organizations, invites, roles (owner/admin/member), two-factor authentication, audit log, data export, organization deletion |
 | Agents | "Describe your agent" AI setup, 6 templates, form-based builder with autosave, draft → publish of immutable versions, make an old version live, duplicate, on/off |
 | Models | OpenAI, Anthropic, Google behind one model layer; platform credits **or** the org's own key (BYOK), per provider |
 | Agent engine | Tool-calling loop with step, time and token limits, conversation memory, cost tracking, defenses against instructions hidden in data |

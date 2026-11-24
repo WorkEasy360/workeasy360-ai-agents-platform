@@ -1,14 +1,28 @@
 "use client";
 
 import Link from "next/link";
-import { useRouter } from "next/navigation";
-import { useState } from "react";
+import { useRouter, useSearchParams } from "next/navigation";
+import { Suspense, useState } from "react";
 import { Button, Card, FormError, Input, Label } from "@/components/ui";
 import { GoogleButton } from "@/components/google-button";
+import { Workeasy360Button, workeasy360ErrorMessage } from "@/components/workeasy360";
 import { authClient } from "@/lib/auth-client";
+import { usePlatform } from "@/lib/use-platform";
 
 export default function LoginPage() {
+  return (
+    <Suspense fallback={<Card>Loading…</Card>}>
+      <LoginForm />
+    </Suspense>
+  );
+}
+
+function LoginForm() {
   const router = useRouter();
+  const params = useSearchParams();
+  const { data: platform } = usePlatform();
+  // Why a WorkEasy360 sign-in did not complete (never started again automatically from here).
+  const ssoError = workeasy360ErrorMessage(params.get("sso_error"), params.get("reason"));
   const [error, setError] = useState<string | null>(null);
   const [pending, setPending] = useState(false);
   // Set when the account has two-factor authentication: ask for the app code next.
@@ -67,10 +81,26 @@ export default function LoginPage() {
     );
   }
 
+  if (platform?.ssoOnly) {
+    return (
+      <Card>
+        <h1 className="mb-1 text-xl font-semibold">Sign in</h1>
+        <p className="mb-4 text-sm text-[var(--muted)]">WorkEasy360 Agents uses your WorkEasy360 account.</p>
+        <FormError message={ssoError} />
+        <Workeasy360Button primary />
+      </Card>
+    );
+  }
+
   return (
     <Card>
       <h1 className="mb-1 text-xl font-semibold">Sign in</h1>
       <p className="mb-6 text-sm text-[var(--muted)]">Welcome back.</p>
+      {ssoError && (
+        <div className="mb-4">
+          <FormError message={ssoError} />
+        </div>
+      )}
       <form onSubmit={onSubmit} className="space-y-4">
         <div>
           <Label htmlFor="email">Email</Label>
@@ -93,6 +123,7 @@ export default function LoginPage() {
         </Button>
       </form>
       <GoogleButton />
+      {platform?.workeasy360 && <Workeasy360Button />}
       <p className="mt-6 text-center text-sm text-[var(--muted)]">
         New here?{" "}
         <Link href="/signup" className="font-medium text-brand-600 hover:underline">
